@@ -236,10 +236,10 @@ export default function ScraperForm() {
   };
 
   const TABS = [
-    { id: "sirene", label: "Sirène INSEE", badge: "Gratuit" },
-    { id: "csv", label: "Import CSV", badge: null },
-    { id: "google", label: "Google Maps", badge: null },
-    { id: "pj", label: "PagesJaunes", badge: null },
+    { id: "sirene", label: "Sirène INSEE" },
+    { id: "csv",    label: "Import CSV" },
+    { id: "google", label: "Google Maps" },
+    { id: "pj",     label: "PagesJaunes" },
   ] as const;
 
   return (
@@ -258,13 +258,8 @@ export default function ScraperForm() {
             )}
           >
             {t.label}
-            {t.badge && (
-              <span className={cn(
-                "ml-1 text-[10px] px-1 py-0.5 rounded font-semibold",
-                t.badge === "Gratuit" ? "bg-green-100 text-green-700"
-          : t.badge === "Script" ? "bg-purple-100 text-purple-600"
-          : "bg-slate-100 text-slate-500"
-              )}>{t.badge}</span>
+            {t.id === "sirene" && (
+              <span className="ml-1 text-[10px] px-1 py-0.5 rounded font-semibold bg-green-100 text-green-700">Gratuit</span>
             )}
           </button>
         ))}
