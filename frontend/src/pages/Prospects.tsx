@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useProspects } from "@/hooks/useProspects";
 import { Prospect, ProspectStatus, ProspectSource } from "@/api/prospects";
-import { mockApi } from "@/api/mock";
 import ProspectDrawer from "@/components/ProspectDrawer";
+import ProspectModal from "@/components/ProspectModal";
 import { Plus, Search, RefreshCw } from "lucide-react";
 import { cn, STATUS_LABELS, STATUS_COLORS, NAF_LABELS, icpColor, SOURCE_LABELS } from "@/lib/utils";
 
@@ -53,6 +53,7 @@ export default function ProspectsPage() {
             >
               <Plus size={16} /> Nouveau prospect
             </button>
+
           </div>
         </div>
 
@@ -178,6 +179,12 @@ export default function ProspectsPage() {
         prospect={selected}
         onClose={() => setSelected(null)}
         onUpdate={handleUpdate}
+      />
+
+      <ProspectModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        onCreated={(p) => { refetch(); setSelected(p); setShowCreate(false); }}
       />
     </div>
   );

@@ -18,10 +18,10 @@ export default function ScraperPage() {
 
       <ScraperForm />
 
-      <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-800">
-        <strong>Note :</strong> Les tâches de scraping s'exécutent en arrière-plan via Celery.
-        Les prospects collectés sont automatiquement dédupliqués et scorés.
-        Consultez le <a className="underline font-medium" href="/pipeline">pipeline</a> pour voir les résultats.
+      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-800">
+        <strong>Sirène INSEE</strong> fonctionne directement dans le navigateur — gratuit et sans clé API.
+        Les prospects collectés sont scorés automatiquement (ICP) et ajoutés au{" "}
+        <a className="underline font-medium" href="/pipeline">pipeline</a>.
       </div>
     </div>
   );
