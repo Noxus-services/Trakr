@@ -10,6 +10,8 @@ import re
 import csv
 import argparse
 import logging
+import sys
+import os
 from pathlib import Path
 from datetime import datetime
 
@@ -17,6 +19,16 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
+
+# Permet d'importer le pipeline depuis le dossier parent
+sys.path.insert(0, str(Path(__file__).parent))
+try:
+    from enrichment.pipeline import EnrichmentPipeline, save_enriched_csv
+    from enrichment.models import Lead
+    HAS_PIPELINE = True
+except ImportError:
+    HAS_PIPELINE = False
+    logging.warning("Pipeline d'enrichissement non disponible (enrichment/ introuvable).")
 
 # playwright-stealth rend le browser indétectable (user-agent réaliste, WebGL, etc.)
 try:
@@ -407,15 +419,39 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Scraper Google Maps → CSV de leads B2B"
     )
-    parser.add_argument("--query",    required=True,       help='Recherche Google Maps (ex: "Garagistes Lyon")')
+    parser.add_argument("--query",    required=True,        help='Recherche Google Maps (ex: "Garagistes Lyon")')
     parser.add_argument("--max",      type=int, default=60, help="Nombre max de résultats (défaut: 60)")
     parser.add_argument("--headless", action="store_true",  help="Lancer en mode headless (sans interface)")
-    parser.add_argument("--no-email", action="store_true",  help="Désactiver l'enrichissement email")
+    parser.add_argument("--no-email", action="store_true",  help="Désactiver l'enrichissement email simple")
     parser.add_argument("--output",   default="data_leads.csv", help="Fichier CSV de sortie")
     parser.add_argument(
         "--locations",
         nargs="+",
         help="Liste de localités pour le mode multi (ex: --locations 'Paris 11' 'Paris 12' 'Lyon')"
+    )
+    # ── Pipeline complet ──────────────────────────────────────────────────────
+    parser.add_argument(
+        "--enrich",
+        action="store_true",
+        help=(
+            "Active le pipeline d'enrichissement complet après le scraping :\n"
+            "  Sirène INSEE → dirigeants officiels\n"
+            "  Crawl site web → emails (mailto, JSON-LD, texte)\n"
+            "  Patterns email → prenom.nom@domain, p.nom@domain…\n"
+            "  Vérification SMTP/DNS → indice de fiabilité 0-100\n"
+            "  Déduplication + scoring ICP\n"
+            "Output : *_enriched.csv avec contacts1/2/3, verdicts, scores"
+        )
+    )
+    parser.add_argument(
+        "--no-smtp",
+        action="store_true",
+        help="Avec --enrich : désactive la vérification SMTP (plus rapide)"
+    )
+    parser.add_argument(
+        "--no-sirene",
+        action="store_true",
+        help="Avec --enrich : désactive l'enrichissement Sirène INSEE"
     )
     return parser.parse_args()
 
@@ -424,12 +460,11 @@ async def main():
     args = parse_args()
 
     # Nom de fichier horodaté si non spécifié
+    ts = datetime.now().strftime("%Y%m%d_%H%M")
     if args.output == "data_leads.csv":
-        ts = datetime.now().strftime("%Y%m%d_%H%M")
         args.output = f"leads_{ts}.csv"
 
     if args.locations:
-        # Mode multi-localités
         await scrape_multi_locations(
             base_query=args.query,
             locations=args.locations,
@@ -438,15 +473,60 @@ async def main():
             output_file=args.output,
         )
     else:
-        # Mode simple
         results = await scrape_google_maps(
             search_query=args.query,
             max_results=args.max,
             headless=args.headless,
-            enrich_email=not args.no_email,
+            enrich_email=(not args.no_email) and (not args.enrich),
             output_file=args.output,
         )
-        save_to_csv(results, args.output)
+
+        if args.enrich and HAS_PIPELINE:
+            # ── Pipeline enrichissement complet ───────────────────────────────
+            log.info(f"\n{'═'*60}")
+            log.info("PIPELINE D'ENRICHISSEMENT COMPLET")
+            log.info(f"{'═'*60}")
+            leads = [
+                Lead(
+                    nom=r.get("nom", ""),
+                    ville=_extract_city(r.get("adresse", "")),
+                    adresse=r.get("adresse", ""),
+                    telephone=r.get("telephone", ""),
+                    site_web=r.get("site_web", ""),
+                    note=r.get("note", ""),
+                    nb_avis=r.get("nb_avis", ""),
+                    categorie=r.get("categorie", ""),
+                )
+                for r in results
+            ]
+            enriched_output = args.output.replace(".csv", "_enriched.csv")
+            async with EnrichmentPipeline(
+                verify_smtp=not args.no_smtp,
+                enrich_sirene=not args.no_sirene,
+                concurrency=4,
+            ) as pipeline:
+                enriched = await pipeline.enrich_batch(leads)
+            save_enriched_csv(enriched, enriched_output)
+
+            # Sauvegarder aussi le CSV brut
+            save_to_csv(results, args.output)
+
+        elif args.enrich and not HAS_PIPELINE:
+            log.error("--enrich demandé mais le module enrichment/ est introuvable.")
+            save_to_csv(results, args.output)
+        else:
+            save_to_csv(results, args.output)
+
+
+def _extract_city(adresse: str) -> str:
+    """Extrait la ville depuis une adresse complète (dernier segment)."""
+    if not adresse:
+        return ""
+    parts = adresse.split(",")
+    last = parts[-1].strip()
+    # Retirer le code postal si présent
+    last = re.sub(r"^\d{5}\s*", "", last).strip()
+    return last
 
 
 if __name__ == "__main__":
