@@ -2,7 +2,7 @@ import { useState } from "react";
 import { mockApi } from "@/api/mock";
 import { Prospect, ProspectSource } from "@/api/prospects";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
-import { Search, Loader2, CheckCircle, Upload, AlertTriangle } from "lucide-react";
+import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Copy, Check, Terminal } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAF_OPTIONS = [
@@ -177,9 +177,14 @@ export default function ScraperForm() {
   const [sDept, setSDept] = useState("");
   const [sMax, setSMax] = useState(50);
 
-  // Google Maps
+  // Google Maps (Playwright local)
   const [gmKeyword, setGmKeyword] = useState("restaurant");
   const [gmCity, setGmCity] = useState("");
+  const [gmMax, setGmMax] = useState(60);
+  const [gmEnrich, setGmEnrich] = useState(true);
+  const [gmHeadless, setGmHeadless] = useState(false);
+  const [gmCopied, setGmCopied] = useState(false);
+  const [gmCommand, setGmCommand] = useState<string | null>(null);
 
   // PagesJaunes
   const [pjQuoi, setPjQuoi] = useState("restaurant");
@@ -208,9 +213,19 @@ export default function ScraperForm() {
         setResult(`✓ ${saved} prospects importés depuis ${csvFile.name}.`);
 
       } else if (tab === "google") {
-        if (!gmCity) throw new Error("Entrez une ville ou zone géographique.");
-        // Appel backend requis pour Google Maps (clé API côté serveur)
-        throw new Error("Google Maps requiert une clé API configurée côté backend. Utilisez Sirène INSEE pour la collecte automatique gratuite.");
+        if (!gmKeyword.trim()) throw new Error("Entrez un mot-clé (ex: restaurant, hôtel…)");
+        if (!gmCity.trim()) throw new Error("Entrez une ville ou zone géographique.");
+        const query = `${gmKeyword.trim()} ${gmCity.trim()}`;
+        const flags = [
+          `--query "${query}"`,
+          `--max ${gmMax}`,
+          gmHeadless ? "--headless" : "",
+          gmEnrich ? "--enrich" : "--no-email",
+        ].filter(Boolean).join(" ");
+        const cmd = `python scraper/gmaps_scraper.py ${flags}`;
+        setGmCommand(cmd);
+        setResult("Commande générée — copiez-la dans votre terminal, puis importez le CSV résultant via l'onglet Import CSV.");
+        return;
 
       } else if (tab === "pj") {
         throw new Error("PagesJaunes nécessite le backend FastAPI (scraping Playwright). Utilisez Sirène INSEE pour la collecte automatique gratuite.");
@@ -225,7 +240,7 @@ export default function ScraperForm() {
   const TABS = [
     { id: "sirene", label: "Sirène INSEE", badge: "Gratuit" },
     { id: "csv", label: "Import CSV", badge: null },
-    { id: "google", label: "Google Maps", badge: "API" },
+    { id: "google", label: "Google Maps", badge: "Script" },
     { id: "pj", label: "PagesJaunes", badge: "Backend" },
   ] as const;
 
@@ -248,7 +263,9 @@ export default function ScraperForm() {
             {t.badge && (
               <span className={cn(
                 "ml-1 text-[10px] px-1 py-0.5 rounded font-semibold",
-                t.badge === "Gratuit" ? "bg-green-100 text-green-700" : "bg-slate-100 text-slate-500"
+                t.badge === "Gratuit" ? "bg-green-100 text-green-700"
+          : t.badge === "Script" ? "bg-purple-100 text-purple-600"
+          : "bg-slate-100 text-slate-500"
               )}>{t.badge}</span>
             )}
           </button>
@@ -303,14 +320,67 @@ export default function ScraperForm() {
           </div>
         )}
 
-        {/* ── Google Maps ── */}
+        {/* ── Google Maps (Playwright local) ── */}
         {tab === "google" && (
           <>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-              <strong>Clé API requise.</strong> Configurez <code>GOOGLE_PLACES_API_KEY</code> dans le backend FastAPI, ou utilisez l'extension Chrome pour capturer les fiches directement depuis Google Maps.
+            <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-xs text-slate-700 flex gap-2">
+              <Terminal size={13} className="shrink-0 mt-0.5 text-slate-400" />
+              <span>
+                Utilise le scraper Playwright local — <strong>aucune clé API requise</strong>.
+                Configurez les paramètres, copiez la commande et lancez-la dans votre terminal.
+                Importez ensuite le CSV via l'onglet <strong>Import CSV</strong>.
+              </span>
             </div>
-            <Field label="Mot-clé" value={gmKeyword} onChange={setGmKeyword} placeholder="ex: restaurant, hotel…" />
-            <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Paris, Lyon…" />
+
+            <Field label="Mot-clé" value={gmKeyword} onChange={setGmKeyword} placeholder="ex: restaurant, hôtel, garage…" />
+            <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Lyon, Paris 11e, Bordeaux Centre…" />
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Nb max résultats</label>
+                <input type="number" value={gmMax} onChange={e => setGmMax(Number(e.target.value))}
+                  min={10} max={200} step={10}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div className="flex flex-col gap-2 pt-5">
+                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                  <input type="checkbox" checked={gmEnrich} onChange={e => setGmEnrich(e.target.checked)}
+                    className="rounded" />
+                  Enrichissement complet
+                </label>
+                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
+                  <input type="checkbox" checked={gmHeadless} onChange={e => setGmHeadless(e.target.checked)}
+                    className="rounded" />
+                  Mode headless
+                </label>
+              </div>
+            </div>
+
+            {/* Commande générée */}
+            {gmCommand && (
+              <div className="rounded-lg border border-slate-200 overflow-hidden">
+                <div className="bg-slate-800 text-slate-300 text-[11px] px-3 py-1.5 flex items-center justify-between">
+                  <span className="flex items-center gap-1.5">
+                    <Terminal size={11} />
+                    Commande à lancer dans votre terminal
+                  </span>
+                  <button
+                    onClick={() => { navigator.clipboard.writeText(gmCommand); setGmCopied(true); setTimeout(() => setGmCopied(false), 2000); }}
+                    className="flex items-center gap-1 text-slate-400 hover:text-white transition-colors"
+                  >
+                    {gmCopied ? <Check size={11} className="text-green-400" /> : <Copy size={11} />}
+                    {gmCopied ? "Copié !" : "Copier"}
+                  </button>
+                </div>
+                <pre className="bg-slate-900 text-green-400 text-[11px] px-3 py-2.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">
+                  {gmCommand}
+                </pre>
+                <div className="bg-blue-50 border-t border-blue-100 px-3 py-2 text-[11px] text-blue-700">
+                  Le CSV résultant (<code>leads_*_enriched.csv</code>) est importable via l'onglet <strong>Import CSV</strong>.
+                  {gmEnrich && <span> Enrichissement : Sirène + SMTP/DNS + patterns email.</span>}
+                </div>
+              </div>
+            )}
           </>
         )}
 
