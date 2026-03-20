@@ -3,9 +3,10 @@ import { Prospect, ProspectAction, ProspectStatus } from "@/api/prospects";
 import { Sequence } from "@/api/outreach";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
 import { mockApi } from "@/api/mock";
+import { findContacts, FoundContact } from "@/services/contactFinder";
 import {
   X, Phone, Mail, Globe, MapPin, Star, Send,
-  CheckCircle, Clock, ExternalLink, Plus
+  CheckCircle, Clock, ExternalLink, Plus, Users, Copy, Loader2
 } from "lucide-react";
 import { cn, STATUS_LABELS, STATUS_COLORS, SOURCE_LABELS, NAF_LABELS, icpColor, icpBg } from "@/lib/utils";
 import { format } from "date-fns";
@@ -85,11 +86,15 @@ export default function ProspectDrawer({ prospect, onClose, onUpdate }: Props) {
   const [enrollSeqId, setEnrollSeqId] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [enrolling, setEnrolling] = useState(false);
+  const [contacts, setContacts] = useState<FoundContact[]>([]);
+  const [findingContacts, setFindingContacts] = useState(false);
+  const [contactsCopied, setContactsCopied] = useState<string | null>(null);
 
   useEffect(() => {
     if (!prospect) return;
     setNote(prospect.notes ?? "");
     setEnrollSeqId(null);
+    setContacts([]);
 
     if (isSupabaseConfigured) {
       sbGetActions(prospect.id).then(setActions).catch(console.error);
@@ -191,6 +196,47 @@ export default function ProspectDrawer({ prospect, onClose, onUpdate }: Props) {
 
   const pushOdoo = async () => {
     alert("Synchronisation Odoo simulée (mode démo) — Connectez le backend pour pousser vers Odoo.");
+  };
+
+  const handleFindContacts = async () => {
+    setFindingContacts(true);
+    try {
+      const found = await findContacts({
+        siret: prospect!.siret,
+        site_web: prospect!.site_web,
+        raison_sociale: prospect!.raison_sociale,
+      });
+      setContacts(found);
+      if (found.length === 0) alert("Aucun contact trouvé. Vérifiez que le SIRET est renseigné.");
+    } catch (e: any) {
+      alert("Erreur: " + e.message);
+    } finally {
+      setFindingContacts(false);
+    }
+  };
+
+  const copyEmail = (email: string) => {
+    navigator.clipboard.writeText(email).then(() => {
+      setContactsCopied(email);
+      setTimeout(() => setContactsCopied(null), 2000);
+    });
+  };
+
+  const applyContact = async (c: FoundContact) => {
+    const updates: Partial<Prospect> = {};
+    if (c.prenom && !prospect!.contact_prenom) updates.contact_prenom = c.prenom;
+    if (c.nom && !prospect!.contact_nom) updates.contact_nom = c.nom;
+    if (c.qualite && !prospect!.contact_titre) updates.contact_titre = c.qualite;
+    if (c.email && !prospect!.email) updates.email = c.email;
+    if (Object.keys(updates).length === 0) { alert("Les champs sont déjà renseignés."); return; }
+    try {
+      const updated = isSupabaseConfigured
+        ? await sbUpdateProspect(prospect!.id, updates)
+        : mockApi.prospects.update(prospect!.id, updates);
+      onUpdate(updated);
+    } catch (e: any) {
+      alert("Erreur: " + e.message);
+    }
   };
 
   return (
@@ -324,11 +370,12 @@ export default function ProspectDrawer({ prospect, onClose, onUpdate }: Props) {
                 <Phone size={12} /> Marquer appelé
               </button>
               <button
-                onClick={enrich}
-                disabled={loading}
-                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-lg transition-colors disabled:opacity-50"
+                onClick={handleFindContacts}
+                disabled={findingContacts}
+                className="flex items-center gap-1.5 text-xs px-3 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-lg transition-colors disabled:opacity-50"
               >
-                <Star size={12} /> {loading ? "Enrichissement..." : "Enrichir"}
+                {findingContacts ? <Loader2 size={12} className="animate-spin" /> : <Users size={12} />}
+                {findingContacts ? "Recherche…" : "Trouver décideurs"}
               </button>
               <button
                 onClick={pushOdoo}
@@ -338,6 +385,58 @@ export default function ProspectDrawer({ prospect, onClose, onUpdate }: Props) {
               </button>
             </div>
           </div>
+
+          {/* Contacts décideurs */}
+          {contacts.length > 0 && (
+            <div className="p-5 border-b">
+              <div className="flex items-center justify-between mb-3">
+                <p className="text-xs font-medium text-slate-500">DÉCIDEURS TROUVÉS</p>
+                <span className="text-xs bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full">{contacts.length} contact{contacts.length > 1 ? "s" : ""}</span>
+              </div>
+              <div className="space-y-2">
+                {contacts.map((c, i) => (
+                  <div key={i} className="border border-slate-100 rounded-lg p-3 bg-slate-50">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        {(c.prenom || c.nom) && (
+                          <p className="text-sm font-medium text-slate-800 truncate">
+                            {c.prenom} {c.nom}
+                          </p>
+                        )}
+                        <p className="text-xs text-slate-500">{c.qualite}</p>
+                        {c.email && (
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <span className="text-xs text-blue-700 truncate">{c.email}</span>
+                            {c.email_confidence && (
+                              <span className="text-[10px] text-slate-400 shrink-0">{c.email_confidence}%</span>
+                            )}
+                            <button
+                              onClick={() => copyEmail(c.email!)}
+                              className="text-slate-400 hover:text-slate-600 shrink-0"
+                              title="Copier l'email"
+                            >
+                              {contactsCopied === c.email ? <CheckCircle size={11} className="text-green-500" /> : <Copy size={11} />}
+                            </button>
+                          </div>
+                        )}
+                        <p className="text-[10px] text-slate-400 mt-0.5">
+                          Source : {c.source === "registre_officiel" ? "Registre officiel" : c.source === "pattern" ? "Pattern email" : c.source}
+                          {" · "}Score : {c.decision_score}/100
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => applyContact(c)}
+                        className="text-xs px-2 py-1 bg-white border border-slate-200 hover:border-blue-300 hover:text-blue-600 text-slate-600 rounded-lg transition-colors shrink-0"
+                        title="Appliquer au prospect"
+                      >
+                        Appliquer
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Séquence */}
           <div className="p-5 border-b">
