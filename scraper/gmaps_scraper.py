@@ -1,26 +1,40 @@
 """
 Google Maps Scraper — Trakr Prospector
 Extrait les leads B2B depuis Google Maps sans API officielle.
-Auteur : Senior Python Dev / OSINT
-Usage  : python gmaps_scraper.py --query "Garagistes Lyon" --max 100
+
+Améliorations v2 :
+  - Clic sur chaque fiche → téléphone, adresse, site web réels
+  - Sélecteurs robustes avec fallbacks multiples
+  - Déduplication par nom
+  - Détection fin de liste ("Vous avez atteint la fin")
+  - Délais aléatoires humains
+  - Intégration pipeline enrichissement (--enrich)
+
+Usage :
+  python gmaps_scraper.py --query "Restaurants Lyon" --max 80
+  python gmaps_scraper.py --query "Hôtels Paris" --max 50 --enrich
+  python gmaps_scraper.py --query "Garage" --locations "Lyon" "Bordeaux" --enrich
 """
 
 import asyncio
+import random
 import re
-import csv
 import argparse
 import logging
 import sys
-import os
 from pathlib import Path
 from datetime import datetime
 
 import pandas as pd
-import requests
-from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
-# Permet d'importer le pipeline depuis le dossier parent
+try:
+    from playwright_stealth import stealth_async
+    HAS_STEALTH = True
+except ImportError:
+    HAS_STEALTH = False
+    logging.warning("playwright-stealth non installé.")
+
 sys.path.insert(0, str(Path(__file__).parent))
 try:
     from enrichment.pipeline import EnrichmentPipeline, save_enriched_csv
@@ -28,23 +42,6 @@ try:
     HAS_PIPELINE = True
 except ImportError:
     HAS_PIPELINE = False
-    logging.warning("Pipeline d'enrichissement non disponible (enrichment/ introuvable).")
-
-# playwright-stealth rend le browser indétectable (user-agent réaliste, WebGL, etc.)
-try:
-    from playwright_stealth import stealth_async
-    HAS_STEALTH = True
-except ImportError:
-    HAS_STEALTH = False
-    logging.warning("playwright-stealth non installé — détection bot plus probable.")
-
-# ─── Configuration ────────────────────────────────────────────────────────────
-
-HEADLESS      = False          # True pour prod, False pour déboguer visuellement
-SLOW_MO       = 50             # ms entre chaque action (réduit la détection)
-SCROLL_PAUSE  = 2000           # ms d'attente après chaque scroll (laisse Google charger)
-MAX_RESULTS   = 60             # limite par défaut
-REQUEST_TO    = 10             # timeout requêtes HTTP enrichissement (secondes)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,235 +50,192 @@ logging.basicConfig(
 )
 log = logging.getLogger("gmaps")
 
-# ─── Sélecteurs CSS/ARIA stables (2026) ───────────────────────────────────────
-# Google change ses classes aléatoires — on cible les attributs sémantiques.
+# ─── Sélecteurs avec fallbacks ────────────────────────────────────────────────
 
-SEL_FEED     = 'div[role="feed"]'          # conteneur scrollable de la liste
-SEL_ARTICLE  = 'div[role="article"]'       # chaque fiche établissement
-SEL_COOKIE   = 'button[aria-label*="Tout accepter"], button[aria-label*="Accept all"]'
+SEL_FEED    = 'div[role="feed"]'
+SEL_ARTICLE = 'div[role="article"]'
+SEL_COOKIE  = [
+    'button[aria-label="Tout accepter"]',
+    'button[aria-label="Accept all"]',
+    'button[jsname="higCR"]',
+    'form:nth-child(2) button',
+]
+SEL_END_OF_LIST = [
+    'span:has-text("Vous avez atteint la fin")',
+    'span:has-text("You\'ve reached the end")',
+    'p:has-text("Vous avez atteint la fin")',
+]
 
-# ─── Utilitaire : nettoyage texte ─────────────────────────────────────────────
+# Sélecteurs pour la fiche détaillée (après clic)
+SEL_ADDRESS = [
+    '[data-item-id="address"] .fontBodyMedium',
+    '[data-item-id="address"] span:not([aria-hidden])',
+    'button[data-item-id="address"]',
+]
+SEL_PHONE = [
+    '[data-item-id*="phone:"] .fontBodyMedium',
+    'button[data-item-id*="phone:"] span:not([aria-hidden])',
+    '[data-tooltip*="phone"] .fontBodyMedium',
+]
+SEL_WEBSITE = [
+    'a[data-item-id="authority"]',
+    'a[jsaction*="website"]',
+    'a[href^="http"][data-item-id]',
+]
+SEL_RATING = [
+    'div.F7nice span[aria-hidden="true"]',
+    'span.ceNzKf[aria-hidden="true"]',
+    'div[jsaction*="rating"] span[aria-hidden]',
+]
+SEL_CATEGORY = [
+    'button[jsaction*="pane.rating.category"]',
+    'button.DkEaL',
+    'span.DkEaL',
+]
 
-def clean(text: str | None) -> str:
-    if not text:
-        return ""
-    return " ".join(text.strip().split())
 
-
-# ─── 1. Gestion bannière cookies ──────────────────────────────────────────────
+# ─── Cookies ─────────────────────────────────────────────────────────────────
 
 async def accept_cookies(page) -> None:
-    """Clique sur 'Tout accepter' si la bannière RGPD apparaît."""
-    try:
-        btn = page.locator(SEL_COOKIE).first
-        await btn.wait_for(state="visible", timeout=5000)
-        await btn.click()
-        log.info("Bannière cookies acceptée.")
-        await page.wait_for_timeout(1000)
-    except PlaywrightTimeout:
-        log.debug("Aucune bannière cookies détectée.")
+    for sel in SEL_COOKIE:
+        try:
+            await page.click(sel, timeout=3000)
+            log.info("Cookies acceptés.")
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            return
+        except Exception:
+            continue
 
 
-# ─── 2. Scroll du panneau résultats ───────────────────────────────────────────
+# ─── Extraction depuis la fiche détaillée ────────────────────────────────────
 
-async def scroll_until_complete(page, max_results: int) -> int:
+async def _get_text(page, selectors: list[str]) -> str:
+    """Essaie chaque sélecteur dans l'ordre, retourne le premier texte trouvé."""
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.count():
+                text = (await el.inner_text(timeout=2000)).strip()
+                if text:
+                    return text
+        except Exception:
+            continue
+    return ""
+
+
+async def _get_attr(page, selectors: list[str], attr: str) -> str:
+    for sel in selectors:
+        try:
+            el = page.locator(sel).first
+            if await el.count():
+                val = await el.get_attribute(attr, timeout=2000)
+                if val:
+                    return val.strip()
+        except Exception:
+            continue
+    return ""
+
+
+async def extract_detail(page, name: str) -> dict:
     """
-    Scrolle le div[role='feed'] jusqu'à ce que :
-    - le nombre d'articles ne progresse plus (fin de liste), ou
-    - on a atteint max_results articles.
-    Retourne le nombre final d'articles.
-    """
-    feed = page.locator(SEL_FEED)
-    try:
-        await feed.wait_for(state="visible", timeout=10000)
-    except PlaywrightTimeout:
-        log.error("Le panneau de résultats n'est pas apparu.")
-        return 0
-
-    last_count = 0
-    stale_rounds = 0  # compteur de rounds sans progression
-
-    while True:
-        # Scroll jusqu'en bas du conteneur
-        await feed.evaluate("el => el.scrollTo(0, el.scrollHeight)")
-        await page.wait_for_timeout(SCROLL_PAUSE)
-
-        current_count = await page.locator(SEL_ARTICLE).count()
-        log.info(f"  → {current_count} établissements chargés…")
-
-        if current_count >= max_results:
-            log.info(f"Limite max_results={max_results} atteinte.")
-            break
-
-        if current_count == last_count:
-            stale_rounds += 1
-            if stale_rounds >= 2:
-                log.info("Liste complète — aucun nouveau résultat.")
-                break
-        else:
-            stale_rounds = 0
-
-        last_count = current_count
-
-    return await page.locator(SEL_ARTICLE).count()
-
-
-# ─── 3. Extraction d'un établissement ─────────────────────────────────────────
-
-async def extract_listing(article) -> dict:
-    """
-    Extrait toutes les données d'un article (fiche Maps).
-    Chaque champ est protégé par try/except — certains commerces
-    n'ont pas de site web, de téléphone, ou de note.
+    Extrait toutes les données depuis le panneau de détail (après clic sur la fiche).
+    Chaque champ a plusieurs sélecteurs fallback.
     """
     data = {
-        "nom":         "",
-        "note":        "",
-        "nb_avis":     "",
-        "adresse":     "",
-        "telephone":   "",
-        "site_web":    "",
-        "categorie":   "",
-        "email":       "",   # enrichi plus tard
+        "nom":       name,
+        "adresse":   "",
+        "telephone": "",
+        "site_web":  "",
+        "note":      "",
+        "nb_avis":   "",
+        "categorie": "",
+        "ville":     "",
+        "code_postal": "",
     }
 
-    # Nom — fiable via aria-label de l'article
     try:
-        data["nom"] = clean(await article.get_attribute("aria-label"))
-    except Exception:
-        pass
+        # Adresse
+        data["adresse"] = await _get_text(page, SEL_ADDRESS)
 
-    # Note et nombre d'avis
-    try:
-        # span avec aria-label du type "4,3 étoiles 127 avis"
-        rating_el = article.locator('span[role="img"][aria-label*="étoile"]').first
-        rating_label = await rating_el.get_attribute("aria-label", timeout=2000)
-        if rating_label:
-            parts = rating_label.split()
-            data["note"]    = parts[0] if parts else ""
-            # "127 avis" → on cherche le chiffre
-            avis_match = re.search(r"(\d[\d\s]*)\s+avis", rating_label)
-            if avis_match:
-                data["nb_avis"] = avis_match.group(1).replace(" ", "")
-    except Exception:
-        pass
+        # Téléphone
+        data["telephone"] = await _get_text(page, SEL_PHONE)
+        # Nettoyage : garder uniquement chiffres et +
+        if data["telephone"]:
+            tel_clean = re.sub(r"[^\d+\s\-()]", "", data["telephone"]).strip()
+            data["telephone"] = tel_clean if len(tel_clean) >= 8 else ""
 
-    # Adresse — cherche l'élément avec data-item-id="address"
-    try:
-        addr_el = article.locator('[data-item-id="address"]').first
-        if await addr_el.count() > 0:
-            data["adresse"] = clean(await addr_el.inner_text(timeout=2000))
-    except Exception:
-        pass
+        # Site web (attribut href)
+        data["site_web"] = await _get_attr(page, SEL_WEBSITE, "href")
+        # Filtrer les URLs Google Maps elles-mêmes
+        if data["site_web"] and "google.com" in data["site_web"]:
+            data["site_web"] = ""
 
-    # Téléphone — data-item-id commence par "phone:"
-    try:
-        phone_el = article.locator('[data-item-id^="phone:"]').first
-        if await phone_el.count() > 0:
-            data["telephone"] = clean(await phone_el.inner_text(timeout=2000))
-    except Exception:
-        pass
+        # Note — texte du type "4,3"
+        rating_text = await _get_text(page, SEL_RATING)
+        if rating_text:
+            match = re.search(r"\d[,\.]\d", rating_text)
+            if match:
+                data["note"] = match.group().replace(",", ".")
 
-    # Site web — lien avec data-item-id="authority"
-    try:
-        web_el = article.locator('a[data-item-id="authority"]').first
-        if await web_el.count() > 0:
-            data["site_web"] = await web_el.get_attribute("href", timeout=2000) or ""
-    except Exception:
-        pass
+        # Nombre d'avis — texte du type "(127)"
+        try:
+            avis_el = page.locator('span[aria-label*="avis"]').first
+            if await avis_el.count():
+                avis_label = await avis_el.get_attribute("aria-label", timeout=2000) or ""
+                m = re.search(r"([\d\s]+)\s*avis", avis_label)
+                if m:
+                    data["nb_avis"] = m.group(1).replace(" ", "").replace("\xa0", "")
+        except Exception:
+            pass
 
-    # Catégorie (ex: "Restaurant", "Garage")
-    try:
-        cat_el = article.locator('button[jsaction*="category"]').first
-        if await cat_el.count() > 0:
-            data["categorie"] = clean(await cat_el.inner_text(timeout=2000))
-    except Exception:
-        pass
+        # Catégorie
+        data["categorie"] = await _get_text(page, SEL_CATEGORY)
+
+        # Extraire ville et code postal depuis l'adresse
+        if data["adresse"]:
+            cp_match = re.search(r"\b(\d{5})\b", data["adresse"])
+            if cp_match:
+                data["code_postal"] = cp_match.group(1)
+            # Ville = segment après le code postal
+            parts = data["adresse"].split(",")
+            if len(parts) >= 2:
+                last = parts[-1].strip()
+                last = re.sub(r"^\d{5}\s*", "", last).strip()
+                if last:
+                    data["ville"] = last
+
+    except Exception as e:
+        log.debug(f"extract_detail error: {e}")
 
     return data
 
 
-# ─── 4. Enrichissement email ──────────────────────────────────────────────────
-
-EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
-)
-# Domaines exclus (faux positifs courants dans les sources JS/CSS)
-IGNORED_DOMAINS = {
-    "example.com", "sentry.io", "w3.org", "schema.org",
-    "google.com", "facebook.com", "twitter.com", "jsdelivr.net",
-}
-
-def enrich_with_email(url: str, timeout: int = REQUEST_TO) -> str:
-    """
-    Télécharge la page d'accueil + /contact du site et extrait
-    la première adresse email trouvée dans le source HTML.
-    Retourne "" si aucun email valide n'est trouvé.
-    """
-    if not url or not url.startswith("http"):
-        return ""
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
-
-    # Pages candidates : accueil + /contact
-    base = url.rstrip("/")
-    candidates = [base, f"{base}/contact", f"{base}/contact-us", f"{base}/nous-contacter"]
-
-    for page_url in candidates:
-        try:
-            resp = requests.get(page_url, headers=headers, timeout=timeout, allow_redirects=True)
-            if resp.status_code != 200:
-                continue
-
-            # On cherche d'abord dans le texte visible (plus fiable)
-            soup = BeautifulSoup(resp.text, "html.parser")
-            visible_text = soup.get_text(" ")
-            emails = EMAIL_RE.findall(visible_text)
-
-            for email in emails:
-                domain = email.split("@")[-1].lower()
-                if domain not in IGNORED_DOMAINS and not domain.endswith((".png", ".jpg", ".svg")):
-                    return email.lower()
-
-        except requests.RequestException:
-            continue
-
-    return ""
-
-
-# ─── 5. Orchestrateur principal ───────────────────────────────────────────────
+# ─── Scraper principal ────────────────────────────────────────────────────────
 
 async def scrape_google_maps(
     search_query: str,
-    max_results: int = MAX_RESULTS,
-    headless: bool = HEADLESS,
-    enrich_email: bool = True,
-    output_file: str = "data_leads.csv",
+    max_results: int = 60,
+    headless: bool = False,
 ) -> list[dict]:
     """
-    Lance Playwright, cherche `search_query` sur Google Maps,
-    extrait tous les établissements et retourne une liste de dicts.
+    Scrape Google Maps pour `search_query`.
+    Clique sur chaque fiche pour extraire les données structurées complètes.
     """
-    results = []
+    results: list[dict] = []
+    seen_names: set[str] = set()
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=headless,
-            slow_mo=SLOW_MO,
+            slow_mo=30,
             args=[
                 "--no-sandbox",
                 "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
             ],
         )
-
         context = await browser.new_context(
-            viewport={"width": 1280, "height": 900},
+            viewport={"width": 1366, "height": 768},
             locale="fr-FR",
             timezone_id="Europe/Paris",
             user_agent=(
@@ -290,243 +244,219 @@ async def scrape_google_maps(
                 "Chrome/124.0.0.0 Safari/537.36"
             ),
         )
-
         page = await context.new_page()
 
-        # Applique stealth si disponible
         if HAS_STEALTH:
             await stealth_async(page)
-            log.info("Mode stealth activé.")
 
-        # Navigation Google Maps
         log.info(f'Recherche : "{search_query}"')
         await page.goto("https://www.google.com/maps", wait_until="domcontentloaded")
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+
         await accept_cookies(page)
 
-        # Saisie de la recherche dans la barre Maps
-        search_box = page.locator('input#searchboxinput')
-        await search_box.wait_for(state="visible", timeout=10000)
-        await search_box.fill(search_query)
-        await search_box.press("Enter")
+        # Saisie recherche
+        await page.fill("input#searchboxinput", search_query)
+        await asyncio.sleep(random.uniform(0.5, 1.2))
+        await page.keyboard.press("Enter")
 
-        # Attente du panneau résultats
-        await page.wait_for_timeout(3000)
+        # Attente du feed
+        try:
+            await page.wait_for_selector(SEL_FEED, timeout=15000)
+        except PlaywrightTimeout:
+            log.error("Le panneau de résultats n'est pas apparu.")
+            await browser.close()
+            return []
 
-        # Scroll jusqu'à max_results
-        total = await scroll_until_complete(page, max_results)
-        log.info(f"{total} établissements disponibles pour extraction.")
+        await asyncio.sleep(random.uniform(1.5, 2.5))
 
-        # Extraction article par article
-        articles = await page.locator(SEL_ARTICLE).all()
-        articles = articles[:max_results]
+        feed = page.locator(SEL_FEED)
+        no_new_rounds = 0
+        processed_count = 0   # nb d'articles déjà traités dans cette session
 
-        for i, article in enumerate(articles, 1):
-            try:
-                data = await extract_listing(article)
-                log.info(f"[{i}/{len(articles)}] {data['nom'] or '(sans nom)'} | {data['telephone']} | {data['site_web'][:40] if data['site_web'] else '—'}")
-                results.append(data)
-            except Exception as e:
-                log.warning(f"Erreur extraction article {i} : {e}")
+        while len(results) < max_results:
+            # ── Vérifier fin de liste ─────────────────────────────────────
+            for end_sel in SEL_END_OF_LIST:
+                try:
+                    if await page.locator(end_sel).count():
+                        log.info("Fin de liste détectée.")
+                        goto_extract = True
+                        break
+                except Exception:
+                    pass
+            else:
+                goto_extract = False
+
+            # ── Récupérer les articles actuellement visibles ───────────────
+            all_items = await page.locator(SEL_ARTICLE).all()
+            new_items = all_items[processed_count:]
+
+            if not new_items and not goto_extract:
+                no_new_rounds += 1
+                if no_new_rounds >= 3:
+                    log.info("Aucun nouvel article après 3 tentatives — fin.")
+                    break
+                await feed.evaluate("el => el.scrollBy(0, 2000)")
+                await asyncio.sleep(random.uniform(1.5, 3.0))
+                continue
+
+            no_new_rounds = 0
+
+            # ── Traiter chaque nouvel article ─────────────────────────────
+            for item in new_items:
+                if len(results) >= max_results:
+                    break
+                try:
+                    name = (await item.get_attribute("aria-label") or "").strip()
+                    if not name or name in seen_names:
+                        continue
+                    seen_names.add(name)
+
+                    # Clic sur la fiche pour charger le panneau détail
+                    await item.click()
+                    await asyncio.sleep(random.uniform(1.8, 3.2))
+
+                    # Extraction depuis le panneau de détail
+                    data = await extract_detail(page, name)
+                    results.append(data)
+                    log.info(
+                        f"[{len(results)}/{max_results}] {name} | "
+                        f"{data['telephone'] or '—'} | "
+                        f"{(data['site_web'] or '—')[:45]}"
+                    )
+
+                    # Délai humain entre fiches
+                    await asyncio.sleep(random.uniform(0.8, 1.8))
+
+                except Exception as e:
+                    log.debug(f"Erreur sur une fiche : {e}")
+                    continue
+
+            processed_count = len(all_items)
+
+            if goto_extract:
+                break
+
+            # Scroll pour charger la suite
+            await feed.evaluate("el => el.scrollBy(0, 3000)")
+            await asyncio.sleep(random.uniform(1.5, 3.0))
 
         await browser.close()
 
-    # Enrichissement email (synchrone, après fermeture du browser)
-    if enrich_email:
-        log.info("Enrichissement email en cours…")
-        for i, row in enumerate(results, 1):
-            if row.get("site_web") and not row.get("email"):
-                email = enrich_with_email(row["site_web"])
-                if email:
-                    row["email"] = email
-                    log.info(f"  ✓ {row['nom']} → {email}")
-            if i % 10 == 0:
-                log.info(f"  {i}/{len(results)} enrichis…")
-
+    log.info(f"Extraction terminée : {len(results)} établissements.")
     return results
 
 
-# ─── 6. Multi-localités ───────────────────────────────────────────────────────
+# ─── Multi-localités ──────────────────────────────────────────────────────────
 
 async def scrape_multi_locations(
     base_query: str,
     locations: list[str],
     max_per_location: int = 60,
     headless: bool = True,
-    output_file: str = "data_leads.csv",
-) -> None:
-    """
-    Lance le scraper pour chaque localité et consolide en un seul CSV.
-    Évite les doublons par nom + téléphone.
-    Exemple : base_query="Boulangerie", locations=["Paris 11", "Paris 12", "Lyon 6e"]
-    """
+) -> list[dict]:
     all_results: list[dict] = []
     seen: set[str] = set()
 
     for location in locations:
         query = f"{base_query} {location}"
-        log.info(f"\n{'─'*50}\nLocalité : {location}\n{'─'*50}")
+        log.info(f"\n{'─'*55}\nLocalité : {location}\n{'─'*55}")
         try:
-            batch = await scrape_google_maps(
-                search_query=query,
-                max_results=max_per_location,
-                headless=headless,
-                enrich_email=False,   # on enrichit globalement à la fin
-                output_file=output_file,
-            )
+            batch = await scrape_google_maps(query, max_per_location, headless)
             for row in batch:
-                dedup_key = f"{row['nom']}|{row['telephone']}"
-                if dedup_key not in seen:
-                    seen.add(dedup_key)
+                key = f"{row['nom']}|{row['telephone']}"
+                if key not in seen:
+                    seen.add(key)
                     row["localite_recherche"] = location
                     all_results.append(row)
         except Exception as e:
             log.error(f"Erreur sur '{query}' : {e}")
 
-    # Enrichissement global
-    log.info(f"\nEnrichissement email pour {len(all_results)} leads…")
-    for row in all_results:
-        if row.get("site_web") and not row.get("email"):
-            row["email"] = enrich_with_email(row["site_web"])
-
-    save_to_csv(all_results, output_file)
+    return all_results
 
 
-# ─── 7. Sauvegarde CSV ────────────────────────────────────────────────────────
+# ─── Sauvegarde CSV ───────────────────────────────────────────────────────────
 
 def save_to_csv(results: list[dict], output_file: str) -> None:
     if not results:
-        log.warning("Aucun résultat à sauvegarder.")
+        log.warning("Aucun résultat.")
         return
 
     df = pd.DataFrame(results)
-
-    # Ordre des colonnes
-    cols = ["nom", "categorie", "note", "nb_avis", "adresse", "telephone", "email", "site_web"]
+    cols = ["nom", "categorie", "note", "nb_avis", "adresse", "code_postal",
+            "ville", "telephone", "site_web"]
     if "localite_recherche" in df.columns:
         cols.append("localite_recherche")
     df = df[[c for c in cols if c in df.columns]]
+    df.to_csv(output_file, index=False, encoding="utf-8-sig")
 
-    df.to_csv(output_file, index=False, encoding="utf-8-sig")  # utf-8-sig → compatible Excel
-    log.info(f"\n✓ {len(df)} leads sauvegardés dans '{output_file}'")
-    log.info(f"  Avec email    : {df['email'].astype(bool).sum()}")
-    log.info(f"  Avec site web : {df['site_web'].astype(bool).sum()}")
-    log.info(f"  Avec tel      : {df['telephone'].astype(bool).sum()}")
+    log.info(f"\n✓ {len(df)} leads → {output_file}")
+    log.info(f"  Avec téléphone : {df['telephone'].astype(bool).sum()}")
+    log.info(f"  Avec site web  : {df['site_web'].astype(bool).sum()}")
+    log.info(f"  Avec note      : {df['note'].astype(bool).sum()}")
 
 
-# ─── 8. Point d'entrée CLI ────────────────────────────────────────────────────
+# ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        description="Scraper Google Maps → CSV de leads B2B"
-    )
-    parser.add_argument("--query",    required=True,        help='Recherche Google Maps (ex: "Garagistes Lyon")')
-    parser.add_argument("--max",      type=int, default=60, help="Nombre max de résultats (défaut: 60)")
-    parser.add_argument("--headless", action="store_true",  help="Lancer en mode headless (sans interface)")
-    parser.add_argument("--no-email", action="store_true",  help="Désactiver l'enrichissement email simple")
-    parser.add_argument("--output",   default="data_leads.csv", help="Fichier CSV de sortie")
-    parser.add_argument(
-        "--locations",
-        nargs="+",
-        help="Liste de localités pour le mode multi (ex: --locations 'Paris 11' 'Paris 12' 'Lyon')"
-    )
-    # ── Pipeline complet ──────────────────────────────────────────────────────
-    parser.add_argument(
-        "--enrich",
-        action="store_true",
-        help=(
-            "Active le pipeline d'enrichissement complet après le scraping :\n"
-            "  Sirène INSEE → dirigeants officiels\n"
-            "  Crawl site web → emails (mailto, JSON-LD, texte)\n"
-            "  Patterns email → prenom.nom@domain, p.nom@domain…\n"
-            "  Vérification SMTP/DNS → indice de fiabilité 0-100\n"
-            "  Déduplication + scoring ICP\n"
-            "Output : *_enriched.csv avec contacts1/2/3, verdicts, scores"
-        )
-    )
-    parser.add_argument(
-        "--no-smtp",
-        action="store_true",
-        help="Avec --enrich : désactive la vérification SMTP (plus rapide)"
-    )
-    parser.add_argument(
-        "--no-sirene",
-        action="store_true",
-        help="Avec --enrich : désactive l'enrichissement Sirène INSEE"
-    )
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="Google Maps scraper B2B — Trakr")
+    p.add_argument("--query",    required=True)
+    p.add_argument("--max",      type=int, default=60)
+    p.add_argument("--headless", action="store_true")
+    p.add_argument("--output",   default=None)
+    p.add_argument("--locations", nargs="+",
+                   help="Ex: --locations 'Lyon' 'Bordeaux' 'Marseille'")
+    p.add_argument("--enrich",   action="store_true",
+                   help="Pipeline complet : Sirène + SMTP/DNS + scoring fiabilité")
+    p.add_argument("--no-smtp",  action="store_true")
+    p.add_argument("--no-sirene", action="store_true")
+    return p.parse_args()
 
 
 async def main():
     args = parse_args()
-
-    # Nom de fichier horodaté si non spécifié
     ts = datetime.now().strftime("%Y%m%d_%H%M")
-    if args.output == "data_leads.csv":
-        args.output = f"leads_{ts}.csv"
+    output = args.output or f"leads_{ts}.csv"
 
     if args.locations:
-        await scrape_multi_locations(
-            base_query=args.query,
-            locations=args.locations,
-            max_per_location=args.max,
-            headless=args.headless,
-            output_file=args.output,
+        results = await scrape_multi_locations(
+            args.query, args.locations, args.max, args.headless
         )
     else:
-        results = await scrape_google_maps(
-            search_query=args.query,
-            max_results=args.max,
-            headless=args.headless,
-            enrich_email=(not args.no_email) and (not args.enrich),
-            output_file=args.output,
-        )
+        results = await scrape_google_maps(args.query, args.max, args.headless)
 
-        if args.enrich and HAS_PIPELINE:
-            # ── Pipeline enrichissement complet ───────────────────────────────
-            log.info(f"\n{'═'*60}")
-            log.info("PIPELINE D'ENRICHISSEMENT COMPLET")
-            log.info(f"{'═'*60}")
-            leads = [
-                Lead(
-                    nom=r.get("nom", ""),
-                    ville=_extract_city(r.get("adresse", "")),
-                    adresse=r.get("adresse", ""),
-                    telephone=r.get("telephone", ""),
-                    site_web=r.get("site_web", ""),
-                    note=r.get("note", ""),
-                    nb_avis=r.get("nb_avis", ""),
-                    categorie=r.get("categorie", ""),
-                )
-                for r in results
-            ]
-            enriched_output = args.output.replace(".csv", "_enriched.csv")
-            async with EnrichmentPipeline(
-                verify_smtp=not args.no_smtp,
-                enrich_sirene=not args.no_sirene,
-                concurrency=4,
-            ) as pipeline:
-                enriched = await pipeline.enrich_batch(leads)
-            save_enriched_csv(enriched, enriched_output)
+    if args.enrich and HAS_PIPELINE:
+        log.info(f"\n{'═'*55}\nPIPELINE ENRICHISSEMENT\n{'═'*55}")
+        leads = [
+            Lead(
+                nom=r.get("nom", ""),
+                ville=r.get("ville", ""),
+                code_postal=r.get("code_postal", ""),
+                adresse=r.get("adresse", ""),
+                telephone=r.get("telephone", ""),
+                site_web=r.get("site_web", ""),
+                note=r.get("note", ""),
+                nb_avis=r.get("nb_avis", ""),
+                categorie=r.get("categorie", ""),
+                localite_recherche=r.get("localite_recherche", ""),
+            )
+            for r in results
+        ]
+        enriched_file = output.replace(".csv", "_enriched.csv")
+        async with EnrichmentPipeline(
+            verify_smtp=not args.no_smtp,
+            enrich_sirene=not args.no_sirene,
+            concurrency=4,
+        ) as pipeline:
+            enriched = await pipeline.enrich_batch(leads)
+        save_enriched_csv(enriched, enriched_file)
+        save_to_csv(results, output)  # CSV brut aussi
 
-            # Sauvegarder aussi le CSV brut
-            save_to_csv(results, args.output)
-
-        elif args.enrich and not HAS_PIPELINE:
-            log.error("--enrich demandé mais le module enrichment/ est introuvable.")
-            save_to_csv(results, args.output)
-        else:
-            save_to_csv(results, args.output)
-
-
-def _extract_city(adresse: str) -> str:
-    """Extrait la ville depuis une adresse complète (dernier segment)."""
-    if not adresse:
-        return ""
-    parts = adresse.split(",")
-    last = parts[-1].strip()
-    # Retirer le code postal si présent
-    last = re.sub(r"^\d{5}\s*", "", last).strip()
-    return last
+    elif args.enrich and not HAS_PIPELINE:
+        log.error("--enrich : module enrichment/ introuvable.")
+        save_to_csv(results, output)
+    else:
+        save_to_csv(results, output)
 
 
 if __name__ == "__main__":
