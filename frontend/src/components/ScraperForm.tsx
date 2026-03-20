@@ -86,7 +86,14 @@ function normalizePhone(tel: string): string {
 }
 
 // ── Google Maps scraper — appel au backend Playwright ─────────────────────────
-async function searchGoogleMaps(keyword: string, city: string, maxResults: number): Promise<Partial<Prospect>[]> {
+async function searchGoogleMaps(
+  keyword: string,
+  city: string,
+  maxResults: number,
+  useGrid: boolean = false,
+  radiusKm: number = 3.0,
+  stepKm: number = 1.0,
+): Promise<Partial<Prospect>[]> {
   const base = getBackendUrl();
   if (!base) throw new Error("NO_BACKEND");
 
@@ -98,7 +105,7 @@ async function searchGoogleMaps(keyword: string, city: string, maxResults: numbe
         ? { "X-Api-Key": localStorage.getItem("trakr_scraper_key")! }
         : {}),
     },
-    body: JSON.stringify({ keyword, city, max_results: maxResults }),
+    body: JSON.stringify({ keyword, city, max_results: maxResults, use_grid: useGrid, radius_km: radiusKm, step_km: stepKm }),
   });
 
   if (!res.ok) {
@@ -211,6 +218,9 @@ export default function ScraperForm() {
   const [gmKeyword, setGmKeyword] = useState("restaurant");
   const [gmCity, setGmCity] = useState("");
   const [gmMax, setGmMax] = useState(50);
+  const [gmUseGrid, setGmUseGrid] = useState(false);
+  const [gmRadius, setGmRadius] = useState(3);
+  const [gmStep, setGmStep] = useState(1);
 
   // PagesJaunes
   const [pjQuoi, setPjQuoi] = useState("restaurant");
@@ -243,7 +253,7 @@ export default function ScraperForm() {
       } else if (tab === "google") {
         if (!gmKeyword.trim()) throw new Error("Entrez un mot-clé.");
         if (!gmCity.trim()) throw new Error("Entrez une ville.");
-        const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax);
+        const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax, gmUseGrid, gmRadius, gmStep);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre mot-clé ou une ville plus grande.");
         const saved = await saveProspects(items, active);
         setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
@@ -388,15 +398,49 @@ export default function ScraperForm() {
             ) : (
               <>
                 <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
-                  Scraping via navigateur piloté — nom, adresse, téléphone, site web, note collectés automatiquement.
+                  Scraping via navigateur piloté — nom, adresse, téléphone, site web, email, note Google, Place ID collectés automatiquement.
                 </div>
                 <Field label="Mot-clé" value={gmKeyword} onChange={setGmKeyword} placeholder="ex: restaurant, hôtel, garage, pharmacie…" />
-                <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Lyon, Paris 11e, Bordeaux…" />
+                <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Lyon, Paris, Bordeaux…" />
                 <div>
-                  <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de résultats</label>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de résultats max</label>
                   <input type="number" value={gmMax} onChange={e => setGmMax(Number(e.target.value))}
-                    min={10} max={120} step={10}
+                    min={10} max={300} step={10}
                     className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+
+                {/* Mode quadrillage GPS */}
+                <div className={cn("border rounded-xl p-3 space-y-3 transition-colors", gmUseGrid ? "border-purple-300 bg-purple-50" : "border-slate-200 bg-slate-50")}>
+                  <label className="flex items-center gap-2.5 cursor-pointer">
+                    <input type="checkbox" checked={gmUseGrid} onChange={e => setGmUseGrid(e.target.checked)}
+                      className="rounded border-slate-300 text-purple-600 focus:ring-purple-500" />
+                    <div>
+                      <span className="text-xs font-semibold text-slate-700">Mode Quadrillage GPS</span>
+                      <span className="ml-2 text-[10px] bg-purple-100 text-purple-700 px-1.5 py-0.5 rounded font-bold">PRO</span>
+                      <p className="text-[11px] text-slate-500 mt-0.5">
+                        Divise la ville en grille de points GPS → dépasse la limite 200 résultats de Google Maps
+                      </p>
+                    </div>
+                  </label>
+                  {gmUseGrid && (
+                    <div className="grid grid-cols-2 gap-2 pt-1">
+                      <div>
+                        <label className="block text-[11px] text-slate-500 mb-1">Rayon (km)</label>
+                        <input type="number" value={gmRadius} onChange={e => setGmRadius(Number(e.target.value))}
+                          min={1} max={20} step={0.5}
+                          className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500" />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] text-slate-500 mb-1">Pas GPS (km)</label>
+                        <input type="number" value={gmStep} onChange={e => setGmStep(Number(e.target.value))}
+                          min={0.5} max={3} step={0.5}
+                          className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-500" />
+                      </div>
+                      <div className="col-span-2 text-[11px] text-purple-700 bg-purple-100 rounded px-2 py-1.5">
+                        ≈ {Math.round(Math.PI * Math.pow(gmRadius / gmStep, 2))} points GPS · jusqu'à {Math.round(Math.PI * Math.pow(gmRadius / gmStep, 2)) * 20} établissements potentiels
+                      </div>
+                    </div>
+                  )}
                 </div>
               </>
             )}
