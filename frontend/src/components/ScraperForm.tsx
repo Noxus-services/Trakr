@@ -2,7 +2,7 @@ import { useState } from "react";
 import { mockApi } from "@/api/mock";
 import { Prospect, ProspectSource } from "@/api/prospects";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
-import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Copy, Check, Terminal } from "lucide-react";
+import { Search, Loader2, CheckCircle, Upload, AlertTriangle, MapPin, ClipboardCheck } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 const NAF_OPTIONS = [
@@ -182,9 +182,7 @@ export default function ScraperForm() {
   const [gmCity, setGmCity] = useState("");
   const [gmMax, setGmMax] = useState(60);
   const [gmEnrich, setGmEnrich] = useState(true);
-  const [gmHeadless, setGmHeadless] = useState(false);
-  const [gmCopied, setGmCopied] = useState(false);
-  const [gmCommand, setGmCommand] = useState<string | null>(null);
+  const [gmReady, setGmReady] = useState(false);
 
   // PagesJaunes
   const [pjQuoi, setPjQuoi] = useState("restaurant");
@@ -219,12 +217,12 @@ export default function ScraperForm() {
         const flags = [
           `--query "${query}"`,
           `--max ${gmMax}`,
-          gmHeadless ? "--headless" : "",
-          gmEnrich ? "--enrich" : "--no-email",
+          "--headless",
+          gmEnrich ? "--enrich" : "",
         ].filter(Boolean).join(" ");
         const cmd = `python scraper/gmaps_scraper.py ${flags}`;
-        setGmCommand(cmd);
-        setResult("Commande générée — copiez-la dans votre terminal, puis importez le CSV résultant via l'onglet Import CSV.");
+        await navigator.clipboard.writeText(cmd);
+        setGmReady(true);
         return;
 
       } else if (tab === "pj") {
@@ -240,8 +238,8 @@ export default function ScraperForm() {
   const TABS = [
     { id: "sirene", label: "Sirène INSEE", badge: "Gratuit" },
     { id: "csv", label: "Import CSV", badge: null },
-    { id: "google", label: "Google Maps", badge: "Script" },
-    { id: "pj", label: "PagesJaunes", badge: "Backend" },
+    { id: "google", label: "Google Maps", badge: null },
+    { id: "pj", label: "PagesJaunes", badge: null },
   ] as const;
 
   return (
@@ -320,76 +318,61 @@ export default function ScraperForm() {
           </div>
         )}
 
-        {/* ── Google Maps (Playwright local) ── */}
-        {tab === "google" && (
+        {/* ── Google Maps ── */}
+        {tab === "google" && !gmReady && (
           <>
-            <div className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-xs text-slate-700 flex gap-2">
-              <Terminal size={13} className="shrink-0 mt-0.5 text-slate-400" />
-              <span>
-                Utilise le scraper Playwright local — <strong>aucune clé API requise</strong>.
-                Configurez les paramètres, copiez la commande et lancez-la dans votre terminal.
-                Importez ensuite le CSV via l'onglet <strong>Import CSV</strong>.
-              </span>
-            </div>
-
-            <Field label="Mot-clé" value={gmKeyword} onChange={setGmKeyword} placeholder="ex: restaurant, hôtel, garage…" />
-            <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Lyon, Paris 11e, Bordeaux Centre…" />
-
+            <Field label="Mot-clé" value={gmKeyword} onChange={v => { setGmKeyword(v); setGmReady(false); }} placeholder="ex: restaurant, hôtel, garage…" />
+            <Field label="Ville / Zone" value={gmCity} onChange={v => { setGmCity(v); setGmReady(false); }} placeholder="ex: Lyon, Paris 11e, Bordeaux…" />
             <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Nb max résultats</label>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de résultats</label>
                 <input type="number" value={gmMax} onChange={e => setGmMax(Number(e.target.value))}
                   min={10} max={200} step={10}
                   className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
               </div>
-              <div className="flex flex-col gap-2 pt-5">
+              <div className="flex items-end pb-2">
                 <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                  <input type="checkbox" checked={gmEnrich} onChange={e => setGmEnrich(e.target.checked)}
-                    className="rounded" />
-                  Enrichissement complet
-                </label>
-                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                  <input type="checkbox" checked={gmHeadless} onChange={e => setGmHeadless(e.target.checked)}
-                    className="rounded" />
-                  Mode headless
+                  <input type="checkbox" checked={gmEnrich} onChange={e => setGmEnrich(e.target.checked)} className="rounded accent-blue-600" />
+                  Enrichissement contacts
                 </label>
               </div>
             </div>
-
-            {/* Commande générée */}
-            {gmCommand && (
-              <div className="rounded-lg border border-slate-200 overflow-hidden">
-                <div className="bg-slate-800 text-slate-300 text-[11px] px-3 py-1.5 flex items-center justify-between">
-                  <span className="flex items-center gap-1.5">
-                    <Terminal size={11} />
-                    Commande à lancer dans votre terminal
-                  </span>
-                  <button
-                    onClick={() => { navigator.clipboard.writeText(gmCommand); setGmCopied(true); setTimeout(() => setGmCopied(false), 2000); }}
-                    className="flex items-center gap-1 text-slate-400 hover:text-white transition-colors"
-                  >
-                    {gmCopied ? <Check size={11} className="text-green-400" /> : <Copy size={11} />}
-                    {gmCopied ? "Copié !" : "Copier"}
-                  </button>
-                </div>
-                <pre className="bg-slate-900 text-green-400 text-[11px] px-3 py-2.5 overflow-x-auto font-mono whitespace-pre-wrap break-all">
-                  {gmCommand}
-                </pre>
-                <div className="bg-blue-50 border-t border-blue-100 px-3 py-2 text-[11px] text-blue-700">
-                  Le CSV résultant (<code>leads_*_enriched.csv</code>) est importable via l'onglet <strong>Import CSV</strong>.
-                  {gmEnrich && <span> Enrichissement : Sirène + SMTP/DNS + patterns email.</span>}
-                </div>
-              </div>
-            )}
           </>
+        )}
+
+        {tab === "google" && gmReady && (
+          <div className="py-2 space-y-3">
+            <div className="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded-xl">
+              <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center shrink-0">
+                <ClipboardCheck size={16} className="text-green-600" />
+              </div>
+              <div>
+                <p className="text-sm font-semibold text-green-800">Prêt à lancer</p>
+                <p className="text-xs text-green-700">La commande a été copiée dans votre presse-papiers.</p>
+              </div>
+            </div>
+            <div className="space-y-2">
+              {[
+                { n: "1", text: "Ouvrez un terminal dans le dossier du projet" },
+                { n: "2", text: "Collez et exécutez (Ctrl+V puis Entrée)" },
+                { n: "3", text: "Une fois terminé, importez le CSV via l'onglet Import CSV" },
+              ].map(s => (
+                <div key={s.n} className="flex items-center gap-3 text-sm text-slate-600">
+                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center shrink-0">{s.n}</span>
+                  {s.text}
+                </div>
+              ))}
+            </div>
+            <button onClick={() => { setGmReady(false); setResult(null); }}
+              className="text-xs text-slate-400 hover:text-slate-600 underline">
+              Modifier les paramètres
+            </button>
+          </div>
         )}
 
         {/* ── PagesJaunes ── */}
         {tab === "pj" && (
           <>
-            <div className="bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 text-xs text-amber-800">
-              <strong>Backend requis.</strong> Le scraping PagesJaunes utilise Playwright (Python). Démarrez le backend FastAPI ou utilisez Sirène INSEE.
-            </div>
             <Field label="Activité (quoi)" value={pjQuoi} onChange={setPjQuoi} placeholder="ex: restaurant, hôtel…" />
             <Field label="Localisation (où)" value={pjOu} onChange={setPjOu} placeholder="ex: Paris, Lyon…" />
           </>
@@ -408,11 +391,13 @@ export default function ScraperForm() {
           </div>
         )}
 
-        <button onClick={run} disabled={loading}
-          className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50">
-          {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-          {loading ? "Collecte en cours…" : "Lancer la collecte"}
-        </button>
+        {!(tab === "google" && gmReady) && (
+          <button onClick={run} disabled={loading}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50">
+            {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
+            {loading ? "Collecte en cours…" : tab === "google" ? "Préparer la collecte" : "Lancer la collecte"}
+          </button>
+        )}
       </div>
     </div>
   );
