@@ -2,31 +2,10 @@ import { useState } from "react";
 import { mockApi } from "@/api/mock";
 import { Prospect, ProspectSource } from "@/api/prospects";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
+import { useWorkspace, NAF_CATALOG } from "@/hooks/useWorkspace";
 import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Settings } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
-
-const NAF_OPTIONS = [
-  { code: "5610A", label: "5610A — Restauration rapide" },
-  { code: "5610C", label: "5610C — Restauration traditionnelle" },
-  { code: "5630Z", label: "5630Z — Débits de boissons" },
-  { code: "5510Z", label: "5510Z — Hôtellerie" },
-  { code: "4711D", label: "4711D — Supermarchés" },
-  { code: "1013A", label: "1013A — IAA Viande" },
-  { code: "1089Z", label: "1089Z — IAA Autres" },
-];
-
-// ── ICP scoring ────────────────────────────────────────────────────────────────
-function computeIcp(p: Partial<Prospect>): number {
-  let score = 0;
-  if (p.code_naf && NAF_OPTIONS.some(n => n.code === p.code_naf)) score += 30;
-  const eff = p.effectif ?? 0;
-  if (eff >= 10 && eff <= 200) score += 20;
-  if (p.tel) score += 20;
-  if (p.email) score += 15;
-  if (p.siret) score += 15;
-  return Math.min(score, 100);
-}
 
 // ── Backend URL ────────────────────────────────────────────────────────────────
 function getBackendUrl(): string {
@@ -43,7 +22,7 @@ function nafWithDot(code: string): string {
 
 async function searchSirene(naf: string, postal: string, dept: string, maxResults = 50): Promise<Partial<Prospect>[]> {
   const params = new URLSearchParams({
-    q: NAF_OPTIONS.find(o => o.code === naf)?.label.split("—")[1]?.trim() || naf,
+    q: NAF_CATALOG.find(o => o.code === naf)?.label || naf,
     activite_principale: nafWithDot(naf),
     per_page: String(Math.min(maxResults, 25)),
     page: "1",
@@ -174,12 +153,15 @@ function parseCSV(text: string): Partial<Prospect>[] {
 }
 
 // ── Save prospects ─────────────────────────────────────────────────────────────
-async function saveProspects(items: Partial<Prospect>[]): Promise<number> {
+async function saveProspects(
+  items: Partial<Prospect>[],
+  wsStore: ReturnType<typeof useWorkspace>
+): Promise<number> {
   let saved = 0;
   if (isSupabaseConfigured) {
     const toInsert = items.map(p => ({
       ...p,
-      icp_score: computeIcp(p),
+      icp_score: computeIcp(p, wsStore),
       status: "new",
       email_verified: false,
       unsubscribed: false,
@@ -189,22 +171,39 @@ async function saveProspects(items: Partial<Prospect>[]): Promise<number> {
     saved = (data ?? []).length;
   } else {
     for (const item of items) {
-      mockApi.prospects.create({ ...item, icp_score: computeIcp(item) });
+      mockApi.prospects.create({ ...item, icp_score: computeIcp(item, wsStore) });
       saved++;
     }
   }
   return saved;
 }
 
+// ── ICP scoring (uses workspace criteria) ──────────────────────────────────────
+function computeIcp(p: Partial<Prospect>, ws: ReturnType<typeof useWorkspace>): number {
+  const active = ws.active();
+  let score = 0;
+  if (p.code_naf && active.naf_codes.includes(p.code_naf)) score += 30;
+  const eff = p.effectif ?? 0;
+  if (eff >= active.icp_effectif_min && eff <= active.icp_effectif_max) score += 20;
+  if (!active.icp_require_tel || p.tel) score += 20; else if (p.tel) score += 20;
+  if (!active.icp_require_email || p.email) score += 15; else if (p.email) score += 15;
+  if (p.siret) score += 15;
+  return Math.min(score, 100);
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 export default function ScraperForm() {
+  const ws = useWorkspace();
+  const active = ws.active();
+  const nafOptions = ws.activeNafOptions();
+
   const [tab, setTab] = useState<"sirene" | "csv" | "google" | "pj">("sirene");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Sirene
-  const [sNaf, setSNaf] = useState("5610A");
+  // Sirene — default to first NAF code of active workspace
+  const [sNaf, setSNaf] = useState(() => nafOptions[0]?.code ?? "5610A");
   const [sPostal, setSPostal] = useState("");
   const [sDept, setSDept] = useState("");
   const [sMax, setSMax] = useState(50);
@@ -231,7 +230,7 @@ export default function ScraperForm() {
       if (tab === "sirene") {
         const items = await searchSirene(sNaf, sPostal, sDept, sMax);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre département ou code postal.");
-        const saved = await saveProspects(items);
+        const saved = await saveProspects(items, ws);
         setResult(`${saved} prospects collectés depuis Sirène INSEE et ajoutés au pipeline.`);
 
       } else if (tab === "csv") {
@@ -239,7 +238,7 @@ export default function ScraperForm() {
         const text = await csvFile.text();
         const items = parseCSV(text);
         if (items.length === 0) throw new Error("Le fichier est vide ou le format n'est pas reconnu.");
-        const saved = await saveProspects(items);
+        const saved = await saveProspects(items, ws);
         setResult(`${saved} prospects importés depuis ${csvFile.name}.`);
 
       } else if (tab === "google") {
@@ -247,7 +246,7 @@ export default function ScraperForm() {
         if (!gmCity.trim()) throw new Error("Entrez une ville.");
         const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre mot-clé ou une ville plus grande.");
-        const saved = await saveProspects(items);
+        const saved = await saveProspects(items, ws);
         setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
 
       } else if (tab === "pj") {
@@ -316,11 +315,23 @@ export default function ScraperForm() {
               Collecte directe depuis l'API officielle du gouvernement français — aucune clé requise.
             </div>
             <div>
-              <label className="block text-xs font-medium text-slate-600 mb-1">Code NAF / Secteur</label>
-              <select value={sNaf} onChange={e => setSNaf(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
-                {NAF_OPTIONS.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
-              </select>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Code NAF / Secteur
+                <span className="ml-1 text-[11px] text-slate-400 font-normal">
+                  (codes de l'espace «{active.name}»)
+                </span>
+              </label>
+              {nafOptions.length === 0 ? (
+                <div className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                  Aucun code NAF sélectionné pour cet espace. Configurez-les dans{" "}
+                  <Link to="/settings" className="underline font-medium">Paramètres</Link>.
+                </div>
+              ) : (
+                <select value={sNaf} onChange={e => setSNaf(e.target.value)}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
+                  {nafOptions.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
+                </select>
+              )}
             </div>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Code postal (optionnel)" value={sPostal} onChange={setSPostal} placeholder="ex: 75001" />
