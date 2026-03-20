@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import os
+import uvicorn
 
 app = FastAPI(title="Trakr Scraper", version="2.0.0", docs_url="/api/docs")
 
@@ -62,3 +63,8 @@ async def scrape_google_maps(
         raise HTTPException(status_code=500, detail=str(e))
 
     return {"count": len(results), "results": results}
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
