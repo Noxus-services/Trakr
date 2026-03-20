@@ -41,7 +41,7 @@ dnspython==2.7.0
 sendgrid==6.11.0
 
 # Odoo
-odoorpc==0.10.0
+odoorpc==0.10.1
 
 # Templating
 jinja2==3.1.4
