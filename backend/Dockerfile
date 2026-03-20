@@ -3,19 +3,14 @@ FROM mcr.microsoft.com/playwright/python:v1.49.0-jammy
 
 WORKDIR /app
 
-# Deps système pour psycopg2 (au cas où)
-RUN apt-get update && apt-get install -y gcc libpq-dev curl \
-    && rm -rf /var/lib/apt/lists/*
+# Installer uniquement les dépendances du scraper (rapide + fiable)
+COPY requirements_scraper.txt .
+RUN pip install --no-cache-dir -r requirements_scraper.txt
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# Chromium déjà dans l'image, on s'assure qu'il est accessible
-RUN playwright install chromium
-
+# Copier tout le repo (Chromium déjà dans l'image, pas besoin de playwright install)
 COPY . .
 
 EXPOSE 8000
 
-# Entrypoint léger : health + scraper uniquement (pas de DB requise)
-CMD uvicorn main_scraper:app --host 0.0.0.0 --port ${PORT:-8000}
+# Shell form pour que ${PORT} soit bien substitué par Railway
+CMD ["sh", "-c", "uvicorn main_scraper:app --host 0.0.0.0 --port ${PORT:-8000}"]
