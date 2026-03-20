@@ -14,8 +14,8 @@ app = FastAPI(title="Trakr Scraper", version="2.0.0", docs_url="/api/docs")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
