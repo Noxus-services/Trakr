@@ -8,8 +8,9 @@ import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 // ── Backend URL ────────────────────────────────────────────────────────────────
+const DEFAULT_BACKEND_URL = "https://trakr-production-cfae.up.railway.app";
 function getBackendUrl(): string {
-  return (localStorage.getItem("trakr_backend_url") || "").replace(/\/$/, "");
+  return (localStorage.getItem("trakr_backend_url") || DEFAULT_BACKEND_URL).replace(/\/$/, "");
 }
 
 // ── Sirène API (public, no key) ────────────────────────────────────────────────
