@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "Trakr Prospector",
+  "version": "1.0.0",
+  "description": "Capturez des prospects directement depuis Google Maps et PagesJaunes vers Trakr Prospector.",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.google.com/maps/*",
+    "https://maps.google.com/*",
+    "https://www.pagesjaunes.fr/*",
+    "https://trakr-prospector.vercel.app/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Trakr Prospector",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.google.com/maps/*",
+        "https://maps.google.com/*"
+      ],
+      "js": ["content/google_maps.js"],
+      "css": ["content/button.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://www.pagesjaunes.fr/*"
+      ],
+      "js": ["content/pages_jaunes.js"],
+      "css": ["content/button.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
+  }
+}

@@ -1,0 +1,51 @@
+# Web framework
+fastapi==0.115.5
+uvicorn[standard]==0.32.1
+python-multipart==0.0.12
+
+# Database
+sqlalchemy==2.0.36
+asyncpg==0.30.0
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# Auth
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Config
+pydantic==2.10.3
+pydantic-settings==2.6.1
+
+# HTTP clients
+httpx==0.28.1
+requests==2.32.3
+beautifulsoup4==4.12.3
+
+# Scraping
+playwright==1.49.0
+fake-useragent==1.5.1
+
+# Celery / Redis
+celery==5.4.0
+redis==5.2.1
+flower==2.0.1
+
+# Deduplication / NLP
+rapidfuzz==3.10.1
+
+# Email validation
+dnspython==2.7.0
+
+# Email sending
+sendgrid==6.11.0
+
+# Odoo
+odoorpc==0.10.0
+
+# Templating
+jinja2==3.1.4
+
+# Utils
+python-dotenv==1.0.1
+phonenumbers==8.13.50

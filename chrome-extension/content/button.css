@@ -1,0 +1,85 @@
+/* Bouton flottant Trakr */
+#trakr-btn {
+  position: fixed;
+  bottom: 88px;
+  right: 16px;
+  z-index: 9999999;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #2563eb;
+  color: white;
+  border: none;
+  border-radius: 24px;
+  padding: 10px 16px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(37, 99, 235, 0.45);
+  transition: all 0.2s ease;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+#trakr-btn:hover {
+  background: #1d4ed8;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.55);
+}
+
+#trakr-btn:active {
+  transform: translateY(0);
+}
+
+#trakr-btn.trakr-success {
+  background: #16a34a;
+  box-shadow: 0 4px 16px rgba(22, 163, 74, 0.4);
+}
+
+#trakr-btn.trakr-loading {
+  background: #64748b;
+  cursor: not-allowed;
+}
+
+#trakr-btn svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+/* Toast notification */
+#trakr-toast {
+  position: fixed;
+  bottom: 148px;
+  right: 16px;
+  z-index: 9999999;
+  background: #1e293b;
+  color: white;
+  padding: 10px 16px;
+  border-radius: 12px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.25);
+  max-width: 280px;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: all 0.25s ease;
+  pointer-events: none;
+}
+
+#trakr-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+#trakr-toast.trakr-toast-success {
+  background: #166534;
+  border-left: 3px solid #4ade80;
+}
+
+#trakr-toast.trakr-toast-error {
+  background: #7f1d1d;
+  border-left: 3px solid #f87171;
+}
