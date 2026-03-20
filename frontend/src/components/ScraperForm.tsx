@@ -2,7 +2,8 @@ import { useState } from "react";
 import { mockApi } from "@/api/mock";
 import { Prospect, ProspectSource } from "@/api/prospects";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
-import { Search, Loader2, CheckCircle, Upload, AlertTriangle, MapPin, ClipboardCheck } from "lucide-react";
+import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Settings } from "lucide-react";
+import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
 
 const NAF_OPTIONS = [
@@ -27,9 +28,13 @@ function computeIcp(p: Partial<Prospect>): number {
   return Math.min(score, 100);
 }
 
-// ── Sirène API (public, no key needed) ────────────────────────────────────────
+// ── Backend URL ────────────────────────────────────────────────────────────────
+function getBackendUrl(): string {
+  return (localStorage.getItem("trakr_backend_url") || "").replace(/\/$/, "");
+}
+
+// ── Sirène API (public, no key) ────────────────────────────────────────────────
 function nafWithDot(code: string): string {
-  // "5610A" → "56.10A", "4711D" → "47.11D"
   if (code.length === 5 && !code.includes(".")) {
     return code.slice(0, 2) + "." + code.slice(2);
   }
@@ -46,15 +51,13 @@ async function searchSirene(naf: string, postal: string, dept: string, maxResult
   if (postal) params.set("code_postal", postal);
   if (dept) params.set("departement", dept);
 
-  const url = `https://recherche-entreprises.api.gouv.fr/search?${params}`;
-  const res = await fetch(url);
+  const res = await fetch(`https://recherche-entreprises.api.gouv.fr/search?${params}`);
   if (!res.ok) {
     const body = await res.text().catch(() => "");
     throw new Error(`Erreur API INSEE: ${res.status}${body ? " — " + body.slice(0, 100) : ""}`);
   }
   const json = await res.json();
 
-  // If more pages needed, fetch them
   const totalPages = Math.min(Math.ceil(maxResults / 25), Math.ceil((json.total_results ?? 0) / 25));
   let allResults = json.results ?? [];
   for (let page = 2; page <= totalPages && allResults.length < maxResults; page++) {
@@ -103,6 +106,37 @@ function normalizePhone(tel: string): string {
   return tel;
 }
 
+// ── Google Maps scraper — appel au backend Playwright ─────────────────────────
+async function searchGoogleMaps(keyword: string, city: string, maxResults: number): Promise<Partial<Prospect>[]> {
+  const base = getBackendUrl();
+  if (!base) throw new Error("NO_BACKEND");
+
+  const res = await fetch(`${base}/api/scraper/google-maps/playwright`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(localStorage.getItem("trakr_scraper_key")
+        ? { "X-Api-Key": localStorage.getItem("trakr_scraper_key")! }
+        : {}),
+    },
+    body: JSON.stringify({ keyword, city, max_results: maxResults }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || `Erreur backend: ${res.status}`);
+  }
+
+  const json = await res.json();
+  return (json.results ?? []).map((r: any) => ({
+    ...r,
+    source: "google_maps" as ProspectSource,
+    status: "new" as const,
+    email_verified: false,
+    unsubscribed: false,
+  }));
+}
+
 // ── CSV parser ────────────────────────────────────────────────────────────────
 function parseCSV(text: string): Partial<Prospect>[] {
   const lines = text.split(/\r?\n/).filter(Boolean);
@@ -119,17 +153,15 @@ function parseCSV(text: string): Partial<Prospect>[] {
 
   return lines.slice(1).map(line => {
     const cols = line.split(",");
-    const email = get(cols, ["email", "courriel", "e-mail"]);
     return {
       raison_sociale: get(cols, ["company", "entreprise", "société", "raison", "nom"]) || "Import CSV",
-      nom_commercial: get(cols, ["nom commercial", "trading"]),
-      email,
+      email: get(cols, ["email", "courriel", "e-mail"]),
       tel: get(cols, ["phone", "tel", "téléphone", "mobile"]),
       ville: get(cols, ["city", "ville", "localité"]),
       code_postal: get(cols, ["postal", "zip", "cp", "code postal"]),
       adresse: get(cols, ["address", "adresse"]),
       contact_prenom: get(cols, ["first name", "prénom", "prenom"]),
-      contact_nom: get(cols, ["last name", "nom de famille", "nom"]),
+      contact_nom: get(cols, ["last name", "nom de famille"]),
       contact_titre: get(cols, ["title", "titre", "poste", "fonction"]),
       site_web: get(cols, ["website", "site", "url"]),
       linkedin_url: get(cols, ["linkedin", "profile"]),
@@ -138,7 +170,7 @@ function parseCSV(text: string): Partial<Prospect>[] {
       email_verified: false,
       unsubscribed: false,
     };
-  }).filter(p => p.raison_sociale && p.raison_sociale !== "Import CSV" || p.email);
+  }).filter(p => p.raison_sociale !== "Import CSV" || p.email);
 }
 
 // ── Save prospects ─────────────────────────────────────────────────────────────
@@ -177,12 +209,10 @@ export default function ScraperForm() {
   const [sDept, setSDept] = useState("");
   const [sMax, setSMax] = useState(50);
 
-  // Google Maps (Playwright local)
+  // Google Maps
   const [gmKeyword, setGmKeyword] = useState("restaurant");
   const [gmCity, setGmCity] = useState("");
-  const [gmMax, setGmMax] = useState(60);
-  const [gmEnrich, setGmEnrich] = useState(true);
-  const [gmReady, setGmReady] = useState(false);
+  const [gmMax, setGmMax] = useState(50);
 
   // PagesJaunes
   const [pjQuoi, setPjQuoi] = useState("restaurant");
@@ -190,6 +220,8 @@ export default function ScraperForm() {
 
   // CSV
   const [csvFile, setCsvFile] = useState<File | null>(null);
+
+  const backendConfigured = !!getBackendUrl();
 
   const run = async () => {
     setLoading(true);
@@ -200,7 +232,7 @@ export default function ScraperForm() {
         const items = await searchSirene(sNaf, sPostal, sDept, sMax);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre département ou code postal.");
         const saved = await saveProspects(items);
-        setResult(`✓ ${saved} prospects collectés depuis Sirène INSEE et ajoutés au pipeline.`);
+        setResult(`${saved} prospects collectés depuis Sirène INSEE et ajoutés au pipeline.`);
 
       } else if (tab === "csv") {
         if (!csvFile) throw new Error("Sélectionnez un fichier CSV.");
@@ -208,38 +240,46 @@ export default function ScraperForm() {
         const items = parseCSV(text);
         if (items.length === 0) throw new Error("Le fichier est vide ou le format n'est pas reconnu.");
         const saved = await saveProspects(items);
-        setResult(`✓ ${saved} prospects importés depuis ${csvFile.name}.`);
+        setResult(`${saved} prospects importés depuis ${csvFile.name}.`);
 
       } else if (tab === "google") {
-        if (!gmKeyword.trim()) throw new Error("Entrez un mot-clé (ex: restaurant, hôtel…)");
-        if (!gmCity.trim()) throw new Error("Entrez une ville ou zone géographique.");
-        const query = `${gmKeyword.trim()} ${gmCity.trim()}`;
-        const flags = [
-          `--query "${query}"`,
-          `--max ${gmMax}`,
-          "--headless",
-          gmEnrich ? "--enrich" : "",
-        ].filter(Boolean).join(" ");
-        const cmd = `python scraper/gmaps_scraper.py ${flags}`;
-        await navigator.clipboard.writeText(cmd);
-        setGmReady(true);
-        return;
+        if (!gmKeyword.trim()) throw new Error("Entrez un mot-clé.");
+        if (!gmCity.trim()) throw new Error("Entrez une ville.");
+        const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax);
+        if (items.length === 0) throw new Error("Aucun résultat — essayez un autre mot-clé ou une ville plus grande.");
+        const saved = await saveProspects(items);
+        setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
 
       } else if (tab === "pj") {
-        throw new Error("PagesJaunes nécessite le backend FastAPI (scraping Playwright). Utilisez Sirène INSEE pour la collecte automatique gratuite.");
+        if (!pjQuoi.trim() || !pjOu.trim()) throw new Error("Remplissez l'activité et la localisation.");
+        // PagesJaunes uses same backend
+        const base = getBackendUrl();
+        if (!base) throw new Error("NO_BACKEND");
+        const res = await fetch(`${base}/api/scraper/pages-jaunes`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ quoi: pjQuoi, ou: pjOu, max_pages: 5 }),
+        });
+        if (!res.ok) throw new Error("Erreur backend PagesJaunes");
+        const json = await res.json();
+        setResult(`Tâche lancée (ID: ${json.task_id}). Les résultats arriveront dans quelques minutes.`);
       }
     } catch (e: any) {
-      setError(e.message);
+      if (e.message === "NO_BACKEND") {
+        setError("__NO_BACKEND__");
+      } else {
+        setError(e.message);
+      }
     } finally {
       setLoading(false);
     }
   };
 
   const TABS = [
-    { id: "sirene", label: "Sirène INSEE" },
-    { id: "csv",    label: "Import CSV" },
-    { id: "google", label: "Google Maps" },
-    { id: "pj",     label: "PagesJaunes" },
+    { id: "sirene", label: "Sirène INSEE", badge: { text: "Gratuit", cls: "bg-green-100 text-green-700" } },
+    { id: "csv",    label: "Import CSV",   badge: null },
+    { id: "google", label: "Google Maps",  badge: null },
+    { id: "pj",     label: "PagesJaunes", badge: null },
   ] as const;
 
   return (
@@ -258,14 +298,17 @@ export default function ScraperForm() {
             )}
           >
             {t.label}
-            {t.id === "sirene" && (
-              <span className="ml-1 text-[10px] px-1 py-0.5 rounded font-semibold bg-green-100 text-green-700">Gratuit</span>
+            {t.badge && (
+              <span className={cn("ml-1 text-[10px] px-1.5 py-0.5 rounded font-semibold", t.badge.cls)}>
+                {t.badge.text}
+              </span>
             )}
           </button>
         ))}
       </div>
 
       <div className="p-6 space-y-4">
+
         {/* ── Sirène INSEE ── */}
         {tab === "sirene" && (
           <>
@@ -275,7 +318,7 @@ export default function ScraperForm() {
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Code NAF / Secteur</label>
               <select value={sNaf} onChange={e => setSNaf(e.target.value)}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm">
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500">
                 {NAF_OPTIONS.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
               </select>
             </div>
@@ -287,7 +330,7 @@ export default function ScraperForm() {
               <label className="block text-xs font-medium text-slate-600 mb-1">Nombre max de résultats</label>
               <input type="number" value={sMax} onChange={e => setSMax(Number(e.target.value))}
                 min={10} max={200} step={10}
-                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" />
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
           </>
         )}
@@ -296,7 +339,7 @@ export default function ScraperForm() {
         {tab === "csv" && (
           <div>
             <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800 mb-3">
-              Importez n'importe quel CSV (LinkedIn Sales Navigator, exports CRM, listes clients…). Les colonnes sont détectées automatiquement.
+              Importez n'importe quel CSV (LinkedIn Sales Navigator, exports CRM…). Les colonnes sont détectées automatiquement.
             </div>
             <label className={cn(
               "flex flex-col items-center justify-center gap-2 border-2 border-dashed rounded-lg p-8 cursor-pointer transition-colors",
@@ -306,7 +349,7 @@ export default function ScraperForm() {
               <span className="text-sm text-slate-600 text-center">
                 {csvFile ? csvFile.name : "Cliquez pour sélectionner un fichier .csv"}
               </span>
-              <span className="text-xs text-slate-400">Colonnes supportées : company, email, phone, city, first name, last name…</span>
+              <span className="text-xs text-slate-400">company, email, phone, city, first name, last name…</span>
               <input type="file" accept=".csv,.txt" className="hidden"
                 onChange={e => setCsvFile(e.target.files?.[0] ?? null)} />
             </label>
@@ -314,66 +357,72 @@ export default function ScraperForm() {
         )}
 
         {/* ── Google Maps ── */}
-        {tab === "google" && !gmReady && (
+        {tab === "google" && (
           <>
-            <Field label="Mot-clé" value={gmKeyword} onChange={v => { setGmKeyword(v); setGmReady(false); }} placeholder="ex: restaurant, hôtel, garage…" />
-            <Field label="Ville / Zone" value={gmCity} onChange={v => { setGmCity(v); setGmReady(false); }} placeholder="ex: Lyon, Paris 11e, Bordeaux…" />
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de résultats</label>
-                <input type="number" value={gmMax} onChange={e => setGmMax(Number(e.target.value))}
-                  min={10} max={200} step={10}
-                  className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
-              </div>
-              <div className="flex items-end pb-2">
-                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer">
-                  <input type="checkbox" checked={gmEnrich} onChange={e => setGmEnrich(e.target.checked)} className="rounded accent-blue-600" />
-                  Enrichissement contacts
-                </label>
-              </div>
-            </div>
-          </>
-        )}
-
-        {tab === "google" && gmReady && (
-          <div className="py-2 space-y-3">
-            <div className="flex items-center gap-3 p-3 bg-green-50 border border-green-200 rounded-xl">
-              <div className="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center shrink-0">
-                <ClipboardCheck size={16} className="text-green-600" />
-              </div>
-              <div>
-                <p className="text-sm font-semibold text-green-800">Prêt à lancer</p>
-                <p className="text-xs text-green-700">La commande a été copiée dans votre presse-papiers.</p>
-              </div>
-            </div>
-            <div className="space-y-2">
-              {[
-                { n: "1", text: "Ouvrez un terminal dans le dossier du projet" },
-                { n: "2", text: "Collez et exécutez (Ctrl+V puis Entrée)" },
-                { n: "3", text: "Une fois terminé, importez le CSV via l'onglet Import CSV" },
-              ].map(s => (
-                <div key={s.n} className="flex items-center gap-3 text-sm text-slate-600">
-                  <span className="w-5 h-5 rounded-full bg-blue-100 text-blue-700 text-xs font-bold flex items-center justify-center shrink-0">{s.n}</span>
-                  {s.text}
+            {!backendConfigured ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-5 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mx-auto">
+                  <Settings size={18} className="text-blue-600" />
                 </div>
-              ))}
-            </div>
-            <button onClick={() => { setGmReady(false); setResult(null); }}
-              className="text-xs text-slate-400 hover:text-slate-600 underline">
-              Modifier les paramètres
-            </button>
-          </div>
+                <p className="text-sm font-semibold text-slate-700">Backend non configuré</p>
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Le scraping Google Maps utilise un navigateur piloté côté serveur.<br/>
+                  Configurez l'URL du backend dans les Paramètres pour l'activer.
+                </p>
+                <Link to="/settings"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 underline">
+                  <Settings size={12} />
+                  Ouvrir les Paramètres
+                </Link>
+              </div>
+            ) : (
+              <>
+                <div className="bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 text-xs text-blue-800">
+                  Scraping via navigateur piloté — nom, adresse, téléphone, site web, note collectés automatiquement.
+                </div>
+                <Field label="Mot-clé" value={gmKeyword} onChange={setGmKeyword} placeholder="ex: restaurant, hôtel, garage, pharmacie…" />
+                <Field label="Ville / Zone" value={gmCity} onChange={setGmCity} placeholder="ex: Lyon, Paris 11e, Bordeaux…" />
+                <div>
+                  <label className="block text-xs font-medium text-slate-600 mb-1">Nombre de résultats</label>
+                  <input type="number" value={gmMax} onChange={e => setGmMax(Number(e.target.value))}
+                    min={10} max={120} step={10}
+                    className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                </div>
+              </>
+            )}
+          </>
         )}
 
         {/* ── PagesJaunes ── */}
         {tab === "pj" && (
           <>
-            <Field label="Activité (quoi)" value={pjQuoi} onChange={setPjQuoi} placeholder="ex: restaurant, hôtel…" />
-            <Field label="Localisation (où)" value={pjOu} onChange={setPjOu} placeholder="ex: Paris, Lyon…" />
+            {!backendConfigured ? (
+              <div className="rounded-xl border border-slate-200 bg-slate-50 p-5 text-center space-y-3">
+                <div className="w-10 h-10 rounded-full bg-blue-100 flex items-center justify-center mx-auto">
+                  <Settings size={18} className="text-blue-600" />
+                </div>
+                <p className="text-sm font-semibold text-slate-700">Backend non configuré</p>
+                <p className="text-xs text-slate-500">
+                  PagesJaunes nécessite le backend FastAPI.<br/>
+                  Configurez l'URL dans les Paramètres.
+                </p>
+                <Link to="/settings"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-700 underline">
+                  <Settings size={12} />
+                  Ouvrir les Paramètres
+                </Link>
+              </div>
+            ) : (
+              <>
+                <Field label="Activité (quoi)" value={pjQuoi} onChange={setPjQuoi} placeholder="ex: restaurant, hôtel…" />
+                <Field label="Localisation (où)" value={pjOu} onChange={setPjOu} placeholder="ex: Paris, Lyon…" />
+              </>
+            )}
           </>
         )}
 
-        {error && (
+        {/* Feedback */}
+        {error && error !== "__NO_BACKEND__" && (
           <div className="flex items-start gap-2 text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
             <AlertTriangle size={14} className="mt-0.5 shrink-0" />
             {error}
@@ -386,13 +435,23 @@ export default function ScraperForm() {
           </div>
         )}
 
-        {!(tab === "google" && gmReady) && (
+        {/* Submit — hidden when no backend and tab needs it */}
+        {!(["google", "pj"].includes(tab) && !backendConfigured) && (
           <button onClick={run} disabled={loading}
             className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50">
             {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-            {loading ? "Collecte en cours…" : tab === "google" ? "Préparer la collecte" : "Lancer la collecte"}
+            {loading
+              ? tab === "google" ? "Navigation en cours… (1-3 min)" : "Collecte en cours…"
+              : "Lancer la collecte"}
           </button>
         )}
+      </div>
+
+      {/* Info footer */}
+      <div className="border-t border-slate-100 bg-slate-50 px-6 py-3 text-xs text-slate-500 leading-relaxed">
+        <strong className="text-slate-700">Sirène INSEE</strong> fonctionne directement dans le navigateur — gratuit et sans clé API.{" "}
+        <strong className="text-slate-700">Google Maps</strong> et <strong className="text-slate-700">PagesJaunes</strong>{" "}
+        utilisent le backend Playwright.
       </div>
     </div>
   );

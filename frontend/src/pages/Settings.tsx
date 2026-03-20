@@ -1,9 +1,34 @@
+import { useState, useEffect } from "react";
 import { useAuthStore } from "@/hooks/useAuth";
 import { isSupabaseConfigured } from "@/api/supabase";
-import { User, Shield, Database, CheckCircle, XCircle } from "lucide-react";
+import { User, Shield, Database, CheckCircle, XCircle, Server, Eye, EyeOff } from "lucide-react";
 
 export default function SettingsPage() {
   const { user } = useAuthStore();
+  const [backendUrl, setBackendUrl] = useState(() => localStorage.getItem("trakr_backend_url") || "");
+  const [scraperKey, setScraperKey] = useState(() => localStorage.getItem("trakr_scraper_key") || "");
+  const [showKey, setShowKey] = useState(false);
+  const [backendStatus, setBackendStatus] = useState<"idle" | "ok" | "error">("idle");
+  const [saved, setSaved] = useState(false);
+
+  const testBackend = async () => {
+    const url = backendUrl.replace(/\/$/, "");
+    if (!url) return;
+    try {
+      const res = await fetch(url + "/api/health", { signal: AbortSignal.timeout(5000) });
+      setBackendStatus(res.ok ? "ok" : "error");
+    } catch {
+      setBackendStatus("error");
+    }
+  };
+
+  const saveBackend = () => {
+    localStorage.setItem("trakr_backend_url", backendUrl.replace(/\/$/, ""));
+    localStorage.setItem("trakr_scraper_key", scraperKey);
+    setSaved(true);
+    setTimeout(() => setSaved(false), 2000);
+    testBackend();
+  };
 
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-6">
@@ -92,6 +117,75 @@ export default function SettingsPage() {
               </ol>
             </div>
           )}
+        </div>
+      </section>
+
+
+      {/* Backend Playwright */}
+      <section className="bg-white border border-slate-200 rounded-xl overflow-hidden">
+        <div className="flex items-center gap-3 px-5 py-4 border-b border-slate-100">
+          <Server size={16} className="text-slate-500" />
+          <h2 className="font-semibold text-slate-700 text-sm">Backend Playwright</h2>
+          <span className="ml-auto text-xs text-slate-400">Google Maps · PagesJaunes</span>
+        </div>
+        <div className="p-5 space-y-4">
+          <p className="text-xs text-slate-500">
+            Le scraping Google Maps et PagesJaunes utilise un serveur Python (FastAPI + Playwright).<br/>
+            Déployez le backend sur <strong>Railway</strong> ou <strong>Render</strong> (gratuit) et collez son URL ici.
+          </p>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">URL du backend</label>
+            <div className="flex gap-2">
+              <input
+                value={backendUrl}
+                onChange={e => { setBackendUrl(e.target.value); setBackendStatus("idle"); }}
+                placeholder="https://trakr-backend.railway.app"
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button onClick={testBackend}
+                className="px-3 py-2 text-xs font-medium border border-slate-200 rounded-lg hover:bg-slate-50 whitespace-nowrap">
+                Tester
+              </button>
+            </div>
+            {backendStatus === "ok" && (
+              <p className="text-xs text-green-600 mt-1 flex items-center gap-1"><CheckCircle size={12}/> Backend en ligne</p>
+            )}
+            {backendStatus === "error" && (
+              <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><XCircle size={12}/> Connexion échouée</p>
+            )}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Clé secrète (optionnel)</label>
+            <div className="flex gap-2">
+              <input
+                type={showKey ? "text" : "password"}
+                value={scraperKey}
+                onChange={e => setScraperKey(e.target.value)}
+                placeholder="Laissez vide si non configurée"
+                className="flex-1 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <button onClick={() => setShowKey(s => !s)}
+                className="px-3 py-2 border border-slate-200 rounded-lg hover:bg-slate-50">
+                {showKey ? <EyeOff size={14}/> : <Eye size={14}/>}
+              </button>
+            </div>
+          </div>
+
+          <button onClick={saveBackend}
+            className="w-full py-2 text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition-colors">
+            {saved ? "✓ Enregistré" : "Enregistrer"}
+          </button>
+
+          <div className="bg-slate-50 border border-slate-200 rounded-lg p-4 text-xs space-y-1 text-slate-600">
+            <p className="font-semibold text-slate-700">Déploiement rapide sur Railway :</p>
+            <ol className="list-decimal ml-4 space-y-1">
+              <li>Allez sur <strong>railway.app</strong> → Deploy from GitHub → repo Trakr → dossier <code>backend/</code></li>
+              <li>Ajoutez la variable <code>SCRAPER_API_KEY=votre-secret</code> (optionnel)</li>
+              <li>Railway génère une URL → collez-la ci-dessus</li>
+            </ol>
+          </div>
         </div>
       </section>
 

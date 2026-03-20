@@ -19,7 +19,10 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/0"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/1"
 
-    # Scraping — Google Places
+    # Clé secrète optionnelle pour protéger l'endpoint Playwright
+    SCRAPER_API_KEY: Optional[str] = None
+
+    # Google Places (legacy)
     GOOGLE_PLACES_API_KEY: Optional[str] = None
 
     # Scraping — INSEE Sirene

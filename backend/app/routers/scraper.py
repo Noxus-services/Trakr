@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, BackgroundTasks, UploadFile, File, HTTPException, Header
 from pydantic import BaseModel
 from typing import Optional
 import csv
 import io
 
 from app.core.security import get_current_user
+from app.core.config import settings
 from app.core.database import get_db
 from app.models.user import User
 from app.workers.tasks import (
@@ -16,6 +17,37 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 router = APIRouter()
 
+
+# ── Google Maps Playwright — endpoint direct, sans clé API ─────────────────────
+
+class GoogleMapsPlaywrightRequest(BaseModel):
+    keyword: str
+    city: str
+    max_results: int = 50
+
+
+@router.post("/google-maps/playwright")
+async def scrape_google_maps_playwright_endpoint(
+    req: GoogleMapsPlaywrightRequest,
+    x_api_key: Optional[str] = Header(default=None),
+):
+    """Scrape Google Maps via Playwright stealth. Aucune clé Google requise."""
+    expected_key = getattr(settings, "SCRAPER_API_KEY", None)
+    if expected_key and x_api_key != expected_key:
+        raise HTTPException(status_code=401, detail="Clé API invalide")
+
+    if not req.keyword.strip() or not req.city.strip():
+        raise HTTPException(status_code=400, detail="keyword et city sont requis")
+
+    max_r = min(max(req.max_results, 1), 120)
+
+    from app.services.scraper_google import scrape_google_maps_playwright
+    try:
+        results = await scrape_google_maps_playwright(req.keyword, req.city, max_r)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    return {"count": len(results), "results": results}
 
 class GoogleMapsRequest(BaseModel):
     keyword: str
