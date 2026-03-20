@@ -2,7 +2,7 @@ import { useState } from "react";
 import { mockApi } from "@/api/mock";
 import { Prospect, ProspectSource } from "@/api/prospects";
 import { supabase, isSupabaseConfigured } from "@/api/supabase";
-import { useWorkspace, NAF_CATALOG } from "@/hooks/useWorkspace";
+import { useWorkspace, NAF_CATALOG, WorkspaceConfig } from "@/hooks/useWorkspace";
 import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Settings } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
@@ -155,13 +155,13 @@ function parseCSV(text: string): Partial<Prospect>[] {
 // ── Save prospects ─────────────────────────────────────────────────────────────
 async function saveProspects(
   items: Partial<Prospect>[],
-  wsStore: ReturnType<typeof useWorkspace>
+  activeWs: WorkspaceConfig
 ): Promise<number> {
   let saved = 0;
   if (isSupabaseConfigured) {
     const toInsert = items.map(p => ({
       ...p,
-      icp_score: computeIcp(p, wsStore),
+      icp_score: computeIcp(p, activeWs),
       status: "new",
       email_verified: false,
       unsubscribed: false,
@@ -171,7 +171,7 @@ async function saveProspects(
     saved = (data ?? []).length;
   } else {
     for (const item of items) {
-      mockApi.prospects.create({ ...item, icp_score: computeIcp(item, wsStore) });
+      mockApi.prospects.create({ ...item, icp_score: computeIcp(item, activeWs) });
       saved++;
     }
   }
@@ -179,14 +179,13 @@ async function saveProspects(
 }
 
 // ── ICP scoring (uses workspace criteria) ──────────────────────────────────────
-function computeIcp(p: Partial<Prospect>, ws: ReturnType<typeof useWorkspace>): number {
-  const active = ws.active();
+function computeIcp(p: Partial<Prospect>, active: WorkspaceConfig): number {
   let score = 0;
   if (p.code_naf && active.naf_codes.includes(p.code_naf)) score += 30;
   const eff = p.effectif ?? 0;
   if (eff >= active.icp_effectif_min && eff <= active.icp_effectif_max) score += 20;
-  if (!active.icp_require_tel || p.tel) score += 20; else if (p.tel) score += 20;
-  if (!active.icp_require_email || p.email) score += 15; else if (p.email) score += 15;
+  if (p.tel) score += 20;
+  if (p.email) score += 15;
   if (p.siret) score += 15;
   return Math.min(score, 100);
 }
@@ -230,7 +229,7 @@ export default function ScraperForm() {
       if (tab === "sirene") {
         const items = await searchSirene(sNaf, sPostal, sDept, sMax);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre département ou code postal.");
-        const saved = await saveProspects(items, ws);
+        const saved = await saveProspects(items, active);
         setResult(`${saved} prospects collectés depuis Sirène INSEE et ajoutés au pipeline.`);
 
       } else if (tab === "csv") {
@@ -238,7 +237,7 @@ export default function ScraperForm() {
         const text = await csvFile.text();
         const items = parseCSV(text);
         if (items.length === 0) throw new Error("Le fichier est vide ou le format n'est pas reconnu.");
-        const saved = await saveProspects(items, ws);
+        const saved = await saveProspects(items, active);
         setResult(`${saved} prospects importés depuis ${csvFile.name}.`);
 
       } else if (tab === "google") {
@@ -246,7 +245,7 @@ export default function ScraperForm() {
         if (!gmCity.trim()) throw new Error("Entrez une ville.");
         const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax);
         if (items.length === 0) throw new Error("Aucun résultat — essayez un autre mot-clé ou une ville plus grande.");
-        const saved = await saveProspects(items, ws);
+        const saved = await saveProspects(items, active);
         setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
 
       } else if (tab === "pj") {
