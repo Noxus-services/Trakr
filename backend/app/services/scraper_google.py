@@ -3,6 +3,7 @@ Scraper Google Maps — Playwright stealth + quadrillage GPS + enrichissement em
 Architecture : Grid Search → Maps Worker → Enrichisseur
 """
 import asyncio
+import base64
 import random
 import re
 from typing import Optional
@@ -120,70 +121,100 @@ async def _human_delay(min_ms: int = 800, max_ms: int = 2400) -> None:
     await asyncio.sleep(random.uniform(min_ms / 1000, max_ms / 1000))
 
 
+async def _debug_snapshot(page: Page, label: str) -> None:
+    """Log titre + screenshot base64 dans les logs Railway pour debug visuel."""
+    try:
+        title = await page.title()
+        url = page.url
+        print(f"[DEBUG:{label}] titre={title!r} url={url[:120]}", flush=True)
+        shot = await page.screenshot(type="jpeg", quality=40, full_page=False)
+        b64 = base64.b64encode(shot).decode()
+        # Découper en chunks de 200 chars pour ne pas saturer une seule ligne
+        print(f"[SCREENSHOT:{label}] data:image/jpeg;base64,{b64[:200]}…(tronqué)", flush=True)
+    except Exception as e:
+        print(f"[DEBUG:{label}] screenshot failed: {e}", flush=True)
+
+
 async def _accept_cookies(page: Page) -> None:
     """
-    Gère le consentement Google (page principale + iframe consent.google.com).
-    Google redirige souvent vers consent.google.com en mode headless Linux.
+    Consentement Google — stratégie multi-couche pour Railway (Linux headless).
+
+    Ordre de priorité :
+    1. get_by_role("button").filter(has_text=regex) — le plus robuste, indépendant de la langue
+    2. CSS selectors classiques (aria-label, jsname, classes)
+    3. Iframe consent (ancienne UI)
+    4. Formulaire consent.google.com
     """
-    selectors = [
+    # Attendre que la popup soit visible (peut prendre 1-3s après domcontentloaded)
+    await asyncio.sleep(2.5)
+
+    title = await page.title()
+    url = page.url
+    print(f"[CONSENT] titre={title!r} url={url[:100]}", flush=True)
+
+    # ── Stratégie 1 : get_by_role — force brute textuelle, indépendante de la langue ──
+    # C'est la plus robuste sur les IPs datacenter où Google change ses sélecteurs
+    try:
+        consent_pattern = re.compile(
+            r"(Tout accepter|Accept all|I agree|Accepter|J'accepte|Alle akzeptieren|Aceptar todo)",
+            re.IGNORECASE,
+        )
+        btn = page.get_by_role("button").filter(has_text=consent_pattern)
+        count = await btn.count()
+        if count > 0:
+            await btn.first.click()
+            print("[CONSENT] ✅ Validé via get_by_role textuel", flush=True)
+            await asyncio.sleep(2.0)
+            return
+    except Exception as e:
+        print(f"[CONSENT] get_by_role échoué: {e}", flush=True)
+
+    # ── Stratégie 2 : CSS selectors classiques ──
+    css_selectors = [
         'button[aria-label="Tout accepter"]',
         'button[aria-label="Accept all"]',
         'button[jsname="higCR"]',
-        'button:has-text("Tout accepter")',
-        'button:has-text("Accepter tout")',
-        'button:has-text("Accept all")',
-        'button:has-text("J\'accepte")',
-        # Nouveau UI Google 2024 : "Before you continue"
-        'button.tHlp8d',
-        'div.VfPpkd-RLmnJb',
+        'button.tHlp8d',          # Google 2024
+        'button[jsname="b3VHJd"]', # variante
     ]
-
-    # 1. Attendre que la popup soit visible (peut prendre 1-3s après domcontentloaded)
-    await asyncio.sleep(2.5)
-
-    # 2. Vérifier si on est redirigé vers consent.google.com (cas Railway/Linux)
-    if "consent.google" in page.url:
-        # Chercher dans la page principale (consent.google.com n'utilise pas d'iframe)
-        for sel in selectors:
-            try:
-                btn = page.locator(sel).first
-                if await btn.is_visible(timeout=2000):
-                    await btn.click()
-                    await asyncio.sleep(2.0)
-                    return
-            except Exception:
-                continue
-        # Fallback : formulaire de consentement (POST direct)
-        try:
-            await page.locator('form[action*="consent"] button').last.click()
-            await asyncio.sleep(2.0)
-            return
-        except Exception:
-            pass
-
-    # 3. Chercher dans les frames (ancienne UI iframe)
-    for frame in page.frames:
-        if "consent" in frame.url or "google.com" in frame.url:
-            for sel in selectors:
-                try:
-                    btn = frame.locator(sel).first
-                    if await btn.is_visible(timeout=1500):
-                        await btn.click()
-                        await asyncio.sleep(1.5)
-                        return
-                except Exception:
-                    continue
-
-    # 4. Chercher dans la page principale
-    for sel in selectors:
+    for sel in css_selectors:
         try:
             btn = page.locator(sel).first
             if await btn.is_visible(timeout=1500):
                 await btn.click()
-                await asyncio.sleep(1.5)
+                print(f"[CONSENT] ✅ Validé via CSS: {sel}", flush=True)
+                await asyncio.sleep(2.0)
                 return
         except Exception:
             continue
+
+    # ── Stratégie 3 : Iframes (ancienne UI Google) ──
+    for frame in page.frames:
+        if "consent" in frame.url or ("google" in frame.url and frame.url != page.url):
+            try:
+                btn = frame.get_by_role("button").filter(has_text=re.compile(r"accept|accepter|agree", re.I))
+                if await btn.count() > 0:
+                    await btn.first.click()
+                    print(f"[CONSENT] ✅ Validé dans iframe: {frame.url[:60]}", flush=True)
+                    await asyncio.sleep(2.0)
+                    return
+            except Exception:
+                continue
+
+    # ── Stratégie 4 : consent.google.com — bouton "accepter" dans le form ──
+    if "consent.google" in page.url:
+        try:
+            # Le dernier bouton du formulaire est généralement "Tout accepter"
+            await page.locator("form button").last.click()
+            print("[CONSENT] ✅ Validé via form button last", flush=True)
+            await asyncio.sleep(2.0)
+            return
+        except Exception as e:
+            print(f"[CONSENT] form button last échoué: {e}", flush=True)
+
+    # Aucune stratégie n'a fonctionné — snapshot pour debug Railway
+    print("[CONSENT] ⚠️ Aucun bouton trouvé — snapshot debug", flush=True)
+    await _debug_snapshot(page, "consent-fail")
 
 
 async def _scroll_feed(page: Page, max_results: int) -> None:
@@ -333,11 +364,13 @@ async def _scrape_single_url(
         try:
             await page.locator('div[role="feed"]').wait_for(timeout=15000)
         except Exception:
-            # Émettre un event debug pour savoir ce qui se passe
             page_title = await page.title()
             page_url = page.url
+            msg = f"Pas de feed — titre: {page_title!r}, url: {page_url[:80]}"
+            print(f"[FEED-FAIL] {msg}", flush=True)
+            await _debug_snapshot(page, "feed-fail")
             if progress_cb:
-                await progress_cb({"type": "debug", "msg": f"Pas de feed — titre: {page_title!r}, url: {page_url[:80]}"})
+                await progress_cb({"type": "debug", "msg": msg})
             return []
 
         await _scroll_feed(page, max_results)
