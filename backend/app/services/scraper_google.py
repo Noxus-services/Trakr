@@ -121,18 +121,66 @@ async def _human_delay(min_ms: int = 800, max_ms: int = 2400) -> None:
 
 
 async def _accept_cookies(page: Page) -> None:
+    """
+    Gère le consentement Google (page principale + iframe consent.google.com).
+    Google redirige souvent vers consent.google.com en mode headless Linux.
+    """
     selectors = [
         'button[aria-label="Tout accepter"]',
+        'button[aria-label="Accept all"]',
         'button[jsname="higCR"]',
         'button:has-text("Tout accepter")',
+        'button:has-text("Accepter tout")',
         'button:has-text("Accept all")',
+        'button:has-text("J\'accepte")',
+        # Nouveau UI Google 2024 : "Before you continue"
+        'button.tHlp8d',
+        'div.VfPpkd-RLmnJb',
     ]
+
+    # 1. Attendre que la popup soit visible (peut prendre 1-3s après domcontentloaded)
+    await asyncio.sleep(2.5)
+
+    # 2. Vérifier si on est redirigé vers consent.google.com (cas Railway/Linux)
+    if "consent.google" in page.url:
+        # Chercher dans la page principale (consent.google.com n'utilise pas d'iframe)
+        for sel in selectors:
+            try:
+                btn = page.locator(sel).first
+                if await btn.is_visible(timeout=2000):
+                    await btn.click()
+                    await asyncio.sleep(2.0)
+                    return
+            except Exception:
+                continue
+        # Fallback : formulaire de consentement (POST direct)
+        try:
+            await page.locator('form[action*="consent"] button').last.click()
+            await asyncio.sleep(2.0)
+            return
+        except Exception:
+            pass
+
+    # 3. Chercher dans les frames (ancienne UI iframe)
+    for frame in page.frames:
+        if "consent" in frame.url or "google.com" in frame.url:
+            for sel in selectors:
+                try:
+                    btn = frame.locator(sel).first
+                    if await btn.is_visible(timeout=1500):
+                        await btn.click()
+                        await asyncio.sleep(1.5)
+                        return
+                except Exception:
+                    continue
+
+    # 4. Chercher dans la page principale
     for sel in selectors:
         try:
             btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2500):
+            if await btn.is_visible(timeout=1500):
                 await btn.click()
-                await _human_delay(400, 900)
+                await asyncio.sleep(1.5)
                 return
         except Exception:
             continue
@@ -273,13 +321,24 @@ async def _scrape_single_url(
     """Scrape une URL Maps (un point GPS) et retourne les résultats nouveaux."""
     results = []
     try:
-        await page.goto(maps_url, wait_until="domcontentloaded", timeout=20000)
-        await _human_delay(1000, 2000)
+        await page.goto(maps_url, wait_until="domcontentloaded", timeout=25000)
+        await _human_delay(2000, 3000)
+
+        # Si Google nous a redirigé vers le consentement pendant la navigation
+        if "consent.google" in page.url:
+            await _accept_cookies(page)
+            await page.goto(maps_url, wait_until="domcontentloaded", timeout=25000)
+            await _human_delay(2000, 3000)
 
         try:
-            await page.locator('div[role="feed"]').wait_for(timeout=10000)
+            await page.locator('div[role="feed"]').wait_for(timeout=15000)
         except Exception:
-            return []  # Pas de résultats à ce point GPS
+            # Émettre un event debug pour savoir ce qui se passe
+            page_title = await page.title()
+            page_url = page.url
+            if progress_cb:
+                await progress_cb({"type": "debug", "msg": f"Pas de feed — titre: {page_title!r}, url: {page_url[:80]}"})
+            return []
 
         await _scroll_feed(page, max_results)
 
@@ -362,7 +421,7 @@ async def scrape_google_maps_playwright(
             points = generate_grid(lat, lon, radius_km, step_km)
             kw_enc = quote_plus(keyword)
             urls = [
-                f"https://www.google.com/maps/search/{kw_enc}/@{p[0]},{p[1]},15z"
+                f"https://www.google.com/maps/search/{kw_enc}/@{p[0]},{p[1]},14z"
                 for p in points
             ]
         else:
@@ -394,10 +453,13 @@ async def scrape_google_maps_playwright(
         await stealth_async(page)
 
         try:
-            # Accepter les cookies une seule fois via la page d'accueil Maps
-            await page.goto("https://www.google.com/maps", wait_until="domcontentloaded", timeout=15000)
-            await _human_delay(800, 1500)
+            # Accepter les cookies via google.com d'abord (évite la redirection consent en cours de scraping)
+            await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
             await _accept_cookies(page)
+            # Puis naviguer vers Maps
+            await page.goto("https://www.google.com/maps", wait_until="domcontentloaded", timeout=15000)
+            await asyncio.sleep(2.0)
+            await _accept_cookies(page)  # Au cas où Maps affiche une 2e popup
 
             for i, url in enumerate(urls):
                 if len(all_results) >= max_results:

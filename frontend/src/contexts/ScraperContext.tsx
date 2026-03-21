@@ -231,6 +231,11 @@ export function ScraperProvider({ children }: { children: React.ReactNode }) {
                   }));
                   break;
 
+                case "debug":
+                  // Messages de debug (ex: "Pas de feed — titre: ..., url: ...")
+                  pushMessage(`⚠️ ${event.msg}`);
+                  break;
+
                 case "ping":
                   // ignore
                   break;
