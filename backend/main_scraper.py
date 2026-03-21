@@ -2,8 +2,8 @@
 Entrypoint léger pour Railway — health + Google Maps Playwright uniquement.
 Pas de base de données requise. Pas de Redis. Pas de Celery.
 """
-from fastapi import FastAPI, HTTPException, Header
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -11,13 +11,24 @@ import uvicorn
 
 app = FastAPI(title="Trakr Scraper", version="2.0.0", docs_url="/api/docs")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
+# ── CORS manuel — CORSMiddleware de Starlette échoue sur OPTIONS avec allow_origins=* ──
+CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-API-Key, Authorization",
+    "Access-Control-Max-Age": "86400",
+}
+
+@app.middleware("http")
+async def cors_middleware(request: Request, call_next):
+    # Preflight OPTIONS — répondre immédiatement sans passer aux routes
+    if request.method == "OPTIONS":
+        return JSONResponse(status_code=200, content={}, headers=CORS_HEADERS)
+    response = await call_next(request)
+    for k, v in CORS_HEADERS.items():
+        response.headers[k] = v
+    return response
+
 
 SCRAPER_API_KEY = os.getenv("SCRAPER_API_KEY", "")
 
