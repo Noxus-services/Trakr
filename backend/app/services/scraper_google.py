@@ -217,12 +217,8 @@ async def _accept_cookies(page: Page) -> None:
     await _debug_snapshot(page, "consent-fail")
 
 
-async def _scroll_feed(page: Page, max_results: int) -> None:
-    try:
-        await page.locator('div[role="feed"]').wait_for(timeout=12000)
-    except Exception:
-        return
-    feed = page.locator('div[role="feed"]')
+async def _scroll_feed(page: Page, max_results: int, feed_sel: str = 'div[role="feed"]') -> None:
+    feed = page.locator(feed_sel)
     last_count = 0
     stale = 0
     while True:
@@ -352,19 +348,60 @@ async def _scrape_single_url(
     """Scrape une URL Maps (un point GPS) et retourne les résultats nouveaux."""
     results = []
     try:
-        await page.goto(maps_url, wait_until="domcontentloaded", timeout=25000)
-        await _human_delay(2000, 3000)
+        # "load" > "domcontentloaded" : Google Maps est 100% JS, le feed n'existe
+        # dans le DOM qu'après l'exécution des scripts de rendu.
+        await page.goto(maps_url, wait_until="load", timeout=30000)
+        await asyncio.sleep(3.0)
 
-        # Si Google nous a redirigé vers le consentement pendant la navigation
+        # Redirect consentement mid-navigation
         if "consent.google" in page.url:
             await _accept_cookies(page)
-            await page.goto(maps_url, wait_until="domcontentloaded", timeout=25000)
-            await _human_delay(2000, 3000)
+            await page.goto(maps_url, wait_until="load", timeout=30000)
+            await asyncio.sleep(3.0)
 
-        try:
-            await page.locator('div[role="feed"]').wait_for(timeout=15000)
-        except Exception:
-            page_title = await page.title()
+        page_title = await page.title()
+        print(f"[SCRAPE] url={maps_url[:80]} titre={page_title!r}", flush=True)
+
+        # ── Attendre le feed avec sélecteurs alternatifs ──────────────────────
+        # Google Maps peut utiliser des conteneurs différents selon la version UI
+        FEED_SELECTORS = [
+            'div[role="feed"]',
+            'div[aria-label*="Résultats"]',
+            'div[aria-label*="Results for"]',
+            'div[aria-label*="résultats"]',
+            'div.m6QErb[aria-label]',   # classe CSS interne Maps (stable en 2024)
+        ]
+        feed_sel_used = None
+        for fs in FEED_SELECTORS:
+            try:
+                await page.locator(fs).wait_for(timeout=5000)
+                feed_sel_used = fs
+                break
+            except Exception:
+                continue
+
+        # Si toujours pas de feed → interaction de secours (clic sur search + Enter)
+        if not feed_sel_used:
+            print("[FEED] Feed absent — tentative interaction search box", flush=True)
+            try:
+                search_box = page.locator('input[name="q"], input#searchboxinput').first
+                if await search_box.is_visible(timeout=3000):
+                    await search_box.click()
+                    await asyncio.sleep(0.5)
+                    await page.keyboard.press("Enter")
+                    await asyncio.sleep(3.0)
+                    # Réessayer après interaction
+                    for fs in FEED_SELECTORS:
+                        try:
+                            await page.locator(fs).wait_for(timeout=8000)
+                            feed_sel_used = fs
+                            break
+                        except Exception:
+                            continue
+            except Exception as e:
+                print(f"[FEED] Interaction search box échouée: {e}", flush=True)
+
+        if not feed_sel_used:
             page_url = page.url
             msg = f"Pas de feed — titre: {page_title!r}, url: {page_url[:80]}"
             print(f"[FEED-FAIL] {msg}", flush=True)
@@ -373,7 +410,9 @@ async def _scrape_single_url(
                 await progress_cb({"type": "debug", "msg": msg})
             return []
 
-        await _scroll_feed(page, max_results)
+        print(f"[FEED] ✅ Feed trouvé via: {feed_sel_used}", flush=True)
+
+        await _scroll_feed(page, max_results, feed_sel_used)
 
         articles = await page.locator('div[role="article"]').all()
         for article in articles[:max_results]:
