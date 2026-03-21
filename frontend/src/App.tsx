@@ -9,6 +9,7 @@ import ProspectsPage from "@/pages/Prospects";
 import SequencesPage from "@/pages/Sequences";
 import ScraperPage from "@/pages/Scraper";
 import SettingsPage from "@/pages/Settings";
+import { ScraperProvider } from "@/contexts/ScraperContext";
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const token = useAuthStore((s) => s.token);
@@ -17,6 +18,7 @@ function PrivateRoute({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
+    <ScraperProvider>
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route path="/register" element={<RegisterPage />} />
@@ -37,5 +39,6 @@ export default function App() {
         <Route path="settings" element={<SettingsPage />} />
       </Route>
     </Routes>
+    </ScraperProvider>
   );
 }

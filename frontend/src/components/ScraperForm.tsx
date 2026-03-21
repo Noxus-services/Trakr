@@ -6,6 +6,7 @@ import { useWorkspace, NAF_CATALOG, WorkspaceConfig } from "@/hooks/useWorkspace
 import { Search, Loader2, CheckCircle, Upload, AlertTriangle, Settings } from "lucide-react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/utils";
+import { useScraper } from "@/contexts/ScraperContext";
 
 // ── Backend URL ────────────────────────────────────────────────────────────────
 const DEFAULT_BACKEND_URL = "https://trakr-production-cfae.up.railway.app";
@@ -203,6 +204,7 @@ export default function ScraperForm() {
   const ws = useWorkspace();
   const active = ws.active();
   const nafOptions = ws.activeNafOptions();
+  const scraper = useScraper();
 
   const [tab, setTab] = useState<"sirene" | "csv" | "google" | "pj">("sirene");
   const [loading, setLoading] = useState(false);
@@ -254,10 +256,27 @@ export default function ScraperForm() {
       } else if (tab === "google") {
         if (!gmKeyword.trim()) throw new Error("Entrez un mot-clé.");
         if (!gmCity.trim()) throw new Error("Entrez une ville.");
-        const items = await searchGoogleMaps(gmKeyword.trim(), gmCity.trim(), gmMax, gmUseGrid, gmRadius, gmStep);
-        if (items.length === 0) throw new Error("Aucun résultat — essayez un autre mot-clé ou une ville plus grande.");
-        const saved = await saveProspects(items, active);
-        setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
+        scraper.startScraping(
+          {
+            keyword: gmKeyword.trim(),
+            city: gmCity.trim(),
+            max_results: gmMax,
+            use_grid: gmUseGrid,
+            radius_km: gmRadius,
+            step_km: gmStep,
+          },
+          async (results) => {
+            if (results.length === 0) return;
+            try {
+              const saved = await saveProspects(results, active);
+              setResult(`${saved} établissements collectés depuis Google Maps et ajoutés au pipeline.`);
+            } catch (e: any) {
+              setError(e.message);
+            }
+          }
+        );
+        setResult("Scraping lancé — suivez la progression dans la popup");
+        return; // Don't go through setLoading(false) — scraper runs in background
 
       } else if (tab === "pj") {
         if (!pjQuoi.trim() || !pjOu.trim()) throw new Error("Remplissez l'activité et la localisation.");
@@ -492,10 +511,17 @@ export default function ScraperForm() {
 
         {/* Submit — hidden when no backend and tab needs it */}
         {!(["google", "pj"].includes(tab) && !backendConfigured) && (
-          <button onClick={run} disabled={loading}
-            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50">
-            {loading ? <Loader2 size={16} className="animate-spin" /> : <Search size={16} />}
-            {loading
+          <button
+            onClick={run}
+            disabled={loading || (tab === "google" && scraper.state.isRunning)}
+            className="w-full flex items-center justify-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium py-2.5 rounded-lg transition-colors disabled:opacity-50"
+          >
+            {(loading || (tab === "google" && scraper.state.isRunning))
+              ? <Loader2 size={16} className="animate-spin" />
+              : <Search size={16} />}
+            {tab === "google" && scraper.state.isRunning
+              ? "Scraping en cours…"
+              : loading
               ? tab === "google" ? "Navigation en cours… (1-3 min)" : "Collecte en cours…"
               : "Lancer la collecte"}
           </button>

@@ -162,9 +162,11 @@ async def _scroll_feed(page: Page, max_results: int) -> None:
         last_count = new_count
 
 
-async def _extract_detail(page: Page, name: str) -> dict:
+async def _extract_detail(page: Page, name: str, progress_cb=None) -> dict:
     """Extrait toutes les données d'une fiche établissement Maps."""
     data: dict = {"raison_sociale": name}
+    if progress_cb:
+        await progress_cb({"type": "enriching", "name": name})
 
     async def _text(sel: str) -> Optional[str]:
         try:
@@ -249,6 +251,8 @@ async def _extract_detail(page: Page, name: str) -> dict:
         enrichment = await fetch_contact_info(site_url)
         if enrichment.get("email"):
             data["email"] = enrichment["email"]
+            if progress_cb:
+                await progress_cb({"type": "contact", "name": name, "email": enrichment["email"]})
         if enrichment.get("socials"):
             data["socials"] = enrichment["socials"]
 
@@ -264,6 +268,7 @@ async def _scrape_single_url(
     max_results: int,
     seen_ids: set[str],
     seen_names: set[str],
+    progress_cb=None,
 ) -> list[dict]:
     """Scrape une URL Maps (un point GPS) et retourne les résultats nouveaux."""
     results = []
@@ -294,7 +299,7 @@ async def _scrape_single_url(
                 await article.click()
                 await _human_delay(1500, 2800)
 
-                data = await _extract_detail(page, raw_name)
+                data = await _extract_detail(page, raw_name, progress_cb=progress_cb)
 
                 # Déduplication par place_id
                 place_id = data.get("place_id")
@@ -308,6 +313,8 @@ async def _scrape_single_url(
                 data["email_verified"] = False
                 data["unsubscribed"] = False
                 results.append(data)
+                if progress_cb:
+                    await progress_cb({"type": "company", "name": raw_name, "found": len(results)})
             except Exception:
                 continue
     except Exception:
@@ -322,6 +329,7 @@ async def scrape_google_maps_playwright(
     use_grid: bool = False,
     radius_km: float = 3.0,
     step_km: float = 1.0,
+    progress_cb=None,
 ) -> list[dict]:
     """
     Scrape Google Maps avec Playwright stealth.
@@ -362,6 +370,9 @@ async def scrape_google_maps_playwright(
     else:
         urls = [f"https://www.google.com/maps/search/{quote_plus(keyword)}+{quote_plus(city)}"]
 
+    if progress_cb:
+        await progress_cb({"type": "start", "keyword": keyword, "city": city, "total_urls": len(urls)})
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
@@ -391,8 +402,10 @@ async def scrape_google_maps_playwright(
             for i, url in enumerate(urls):
                 if len(all_results) >= max_results:
                     break
+                if progress_cb:
+                    await progress_cb({"type": "searching", "url_index": i, "total_urls": len(urls)})
                 remaining = max_results - len(all_results)
-                batch = await _scrape_single_url(page, url, keyword, remaining, seen_ids, seen_names)
+                batch = await _scrape_single_url(page, url, keyword, remaining, seen_ids, seen_names, progress_cb=progress_cb)
                 all_results.extend(batch)
 
                 if len(urls) > 1 and i < len(urls) - 1:
